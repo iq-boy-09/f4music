@@ -70,7 +70,7 @@ Copy-Item .env.example .env
 python bot.py
 ```
 
-Do not commit `.env`, Telegram session files, cookies, or the SQLite database. On the first voice-chat run, complete the assistant login code and 2FA prompt in the terminal.
+Do not commit `.env`, Telegram session files, cookies, or the SQLite database. On the first voice-chat run, the configured owner is notified in the bot’s private chat when Telegram requests the assistant verification code; reply there with the code. If 2FA is enabled, the owner can reply with the password too.
 
 ## 2. Linux installation
 
@@ -115,7 +115,7 @@ The Compose volume keeps the database, Telegram sessions, downloads, and Song St
 4. Add the same environment variables from your local `.env` in the host dashboard.
 5. Attach persistent storage and mount it at `/app`, or configure `STATE_DB`, `DOWNLOAD_DIR`, `BOT_SESSION`, and `ASSISTANT_SESSION` to the mounted path.
 6. Start the container with `python bot.py`.
-7. Check logs and complete the assistant login once if the host provides an interactive console.
+7. Check logs and complete the assistant login once. The owner can receive and submit the verification code in the bot’s private chat, so an interactive host console is not required.
 
 If the host is worker-based instead of Docker-based, use the Procfile process:
 
@@ -125,7 +125,7 @@ python bot.py
 
 ## 4. Render deployment
 
-Use a **Background Worker**, not a web service: this bot listens to Telegram and does not expose an HTTP port. The included [`render.yaml`](render.yaml) is a Render Blueprint with a Docker build and persistent `/data` disk.
+Use a **Background Worker**, not a web service: this bot listens to Telegram. The included [`render.yaml`](render.yaml) is a Render Blueprint with a Docker build and persistent `/data` disk. For an already-created Web Service, the bot now exposes a small health endpoint on Render’s `PORT`, so the service can pass the port scan too.
 
 ### Blueprint method
 
@@ -135,7 +135,7 @@ Use a **Background Worker**, not a web service: this bot listens to Telegram and
 4. Enter the secret values marked `sync: false`.
 5. Deploy the worker.
 6. Confirm the persistent disk is mounted at `/data`.
-7. Watch the deploy logs and verify `Bot is live`.
+7. Watch the deploy logs and verify `Bot is live` plus the health-endpoint message if `PORT` is set.
 
 ### Dashboard method
 
@@ -153,7 +153,7 @@ ASSISTANT_SESSION=/data/voice_assistant
 CLEANUP_SESSIONS_ON_EXIT=false
 ```
 
-6. Deploy and inspect the worker logs.
+6. Deploy and inspect the worker logs. If using a Web Service instead, leave Render’s automatic `PORT` variable enabled; the bot binds to it automatically.
 
 Render filesystems are ephemeral without a persistent disk, so sessions and SQLite data must live under `/data`. A disk is single-instance storage; do not scale this bot to multiple instances.
 
@@ -180,6 +180,10 @@ Close the browser before yt-dlp reads its cookie database. Never commit `cookies
 5. Start a voice chat before using `/play`.
 6. Add the Song Studio channel ID `-1003853614558` and make the bot an admin if you want MP3 caching.
 7. Configure `OWNER_IDS` before using `/panel`.
+
+The configured assistant account is kept in a separate session named `voice_assistant_8896291170`. If you move this bot from another assistant account, keep the new session name or remove the old session file before the first login.
+
+If a host still sends a code to the previous number, update `ASSISTANT_PHONE`, `ASSISTANT_USER_ID`, and `ASSISTANT_SESSION` in that host’s Environment settings. Render dashboard variables override local `.env` files, and an old persistent session must be removed or renamed before starting the new login.
 
 ## Commands
 

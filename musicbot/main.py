@@ -12,6 +12,7 @@ if sys.version_info >= (3, 14):
     asyncio.set_event_loop(asyncio.new_event_loop())
 
 from pyrogram import Client, idle
+import pyrogram.client as pyrogram_client
 from pyrogram.connection.transport.tcp.tcp import TCP
 from pyrogram.enums import ParseMode
 from pyrogram.types import BotCommand
@@ -127,6 +128,94 @@ def cleanup_session_files(*session_names):
                 logging.getLogger(__name__).warning("Could not remove session file %s", path)
 
 
+class AssistantLoginBridge:
+    """Relay Pyrogram's first-login prompts to the configured owner in DM."""
+
+    def __init__(self, bot, owner_ids, phone):
+        self.bot = bot
+        self.owner_ids = tuple(owner_ids)
+        self.phone = phone or "the configured assistant number"
+        self.active = False
+        self.phase = ""
+        self._had_prompt = False
+        self._answers = asyncio.Queue()
+
+    async def _notify(self, text):
+        for owner_id in self.owner_ids:
+            try:
+                await self.bot.send_message(owner_id, text)
+            except Exception:
+                logging.getLogger(__name__).warning("Could not notify owner %s about assistant login", owner_id)
+
+    async def input(self, prompt="", hide=False):
+        prompt_text = str(prompt).lower()
+        if "confirmation code" in prompt_text:
+            self.phase = "code"
+            instruction = (
+                "🔐 <b>Assistant verification required</b>\n"
+                "Telegram sent a login code to the configured assistant account.\n"
+                "Reply to this message with the code only."
+            )
+        elif "password" in prompt_text:
+            self.phase = "password"
+            instruction = "🔒 <b>Assistant 2FA password required</b>\nReply with the password only. It will not be logged."
+        else:
+            self.phase = "phone"
+            instruction = "📱 <b>Assistant phone required</b>\nReply with the phone number in international format."
+        self.active = True
+        self._had_prompt = True
+        await self._notify(instruction)
+        answer = await self._answers.get()
+        self.active = False
+        return answer
+
+    async def submit(self, value):
+        if not self.active or not value:
+            return False
+        await self._answers.put(value)
+        return True
+
+    async def notify_success(self):
+        if self._had_prompt:
+            await self._notify("✅ <b>Assistant login successful.</b> Voice playback is ready.")
+            self._had_prompt = False
+
+
+async def start_health_server(log):
+    """Expose a tiny Render-compatible health endpoint when PORT is set."""
+    raw_port = os.getenv("PORT", "").strip()
+    if not raw_port:
+        return None
+    try:
+        port = int(raw_port)
+    except ValueError:
+        log.warning("Ignoring invalid PORT=%r", raw_port)
+        return None
+
+    async def health_handler(reader, writer):
+        try:
+            await reader.read(1024)
+            body = b"F4 Music is live"
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n"
+                + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+                + body
+            )
+            await writer.drain()
+        except Exception:
+            log.debug("Health request failed", exc_info=True)
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    server = await asyncio.start_server(health_handler, "0.0.0.0", port)
+    log.info("Health endpoint listening on 0.0.0.0:%s", port)
+    return server
+
+
 BOT_COMMANDS = [
     BotCommand("start", "open the menu"),
     BotCommand("send", "get an MP3"),
@@ -158,6 +247,14 @@ def main():
 
     async def run():
         log = logging.getLogger(__name__)
+        phone = config.assistant_phone or "not set"
+        masked_phone = phone[:3] + "***" + phone[-3:] if len(phone) >= 6 else phone
+        log.info(
+            "Assistant configuration: phone=%s user_id=%s session=%s",
+            masked_phone,
+            config.assistant_user_id or "not set",
+            config.assistant_session,
+        )
         # PyTgCalls stores the current asyncio loop during construction, so all
         # clients and services must be created inside this asyncio.run loop.
         bot = Client(
@@ -173,13 +270,25 @@ def main():
             api_hash=config.api_hash,
             phone_number=config.assistant_phone,
         )
+        login_bridge = AssistantLoginBridge(bot, config.owner_ids, config.assistant_phone)
         store = QueueStore(config.state_db)
         store.clear_all()
         YouTubeMedia.cleanup_stale_downloads()
         media = YouTubeMedia(config.download_dir, config.cookies_file, config.cookies_from_browser)
-        player = VoicePlayer(assistant, store, media, config.max_queue, config.default_volume)
-        register(bot, player, media, store, config)
+        player = VoicePlayer(
+            assistant,
+            store,
+            media,
+            config.max_queue,
+            config.default_volume,
+            config.assistant_user_id,
+            login_bridge.notify_success,
+        )
+        register(bot, player, media, store, config, login_bridge=login_bridge)
+        original_ainput = pyrogram_client.ainput
+        pyrogram_client.ainput = login_bridge.input
         daily_credit_task = None
+        health_server = None
 
         async def daily_credit_notifier():
             """Refill regular accounts at 00:01 Asia/Kolkata and notify recipients."""
@@ -224,6 +333,7 @@ def main():
             log.info("Bot is live")
             await bot.set_bot_commands(BOT_COMMANDS)
             daily_credit_task = asyncio.create_task(daily_credit_notifier())
+            health_server = await start_health_server(log)
             if config.startup_chat_id is not None:
                 try:
                     await bot.send_message(config.startup_chat_id, HOME_TEXT, disable_web_page_preview=True)
@@ -231,6 +341,10 @@ def main():
                     log.exception("Could not send startup message")
             await idle()
         finally:
+            pyrogram_client.ainput = original_ainput
+            if health_server:
+                health_server.close()
+                await health_server.wait_closed()
             if daily_credit_task:
                 daily_credit_task.cancel()
                 try:

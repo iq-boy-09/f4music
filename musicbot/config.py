@@ -50,6 +50,7 @@ class Config:
     bot_session: str
     assistant_session: str
     assistant_phone: str | None
+    assistant_user_id: int | None
     assistant_username: str | None
     startup_chat_id: int | None
     state_db: Path
@@ -92,6 +93,11 @@ class Config:
         if cookies_file and not cookies_file.is_file():
             raise ConfigError(f"COOKIES_FILE points to a missing file: {cookies_file}")
         cookies_from_browser = _env("COOKIES_FROM_BROWSER") or None
+        assistant_user = _env("ASSISTANT_USER_ID")
+        try:
+            assistant_user_id = int(assistant_user) if assistant_user else None
+        except ValueError as exc:
+            raise ConfigError("ASSISTANT_USER_ID must be a Telegram user ID") from exc
 
         root = Path(__file__).resolve().parent.parent
         owner_ids = _id_list("OWNER_IDS")
@@ -103,6 +109,7 @@ class Config:
             bot_session=_env("BOT_SESSION", "command_bot_live"),
             assistant_session=_env("ASSISTANT_SESSION", "voice_assistant"),
             assistant_phone=_env("ASSISTANT_PHONE") or None,
+            assistant_user_id=assistant_user_id,
             assistant_username=_env("ASSISTANT_USERNAME") or None,
             startup_chat_id=startup_chat_id,
             state_db=Path(_env("STATE_DB", str(root / "musicbot.sqlite3"))),

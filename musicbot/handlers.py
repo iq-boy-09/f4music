@@ -401,7 +401,7 @@ def _compose_template_sync(template_path: Path, thumb_url: str):
 
 
 # ---------------------------------------------------------------------------
-def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, cfg):
+def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, cfg, login_bridge=None):
     started_at = time.time()
     cards = {}            # chat_id -> (message, title) of the live player card
     card_refresh_tasks = {}
@@ -416,6 +416,17 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         if "name" not in bot_info:
             bot_info["name"] = (await app.get_me()).username
         return bot_info["name"]
+
+    if login_bridge:
+        @app.on_message(filters.private & filters.text)
+        async def assistant_login_reply(client, message):
+            if not login_bridge.active:
+                raise ContinuePropagation
+            if not message.from_user or message.from_user.id not in cfg.owner_ids:
+                return
+            accepted = await login_bridge.submit(message.text.strip())
+            if accepted:
+                await message.reply("✅ Received securely. Continuing assistant login…")
 
     async def studio_audio_message(client, query_or_title):
         """Find an MP3 in Song Studio without downloading it again."""

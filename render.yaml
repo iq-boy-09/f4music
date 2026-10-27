@@ -21,7 +21,9 @@ services:
       - key: SUPEROWNER_IDS
         sync: false
       - key: ASSISTANT_PHONE
-        sync: false
+        value: "+917806845633"
+      - key: ASSISTANT_USER_ID
+        value: "8896291170"
       - key: COOKIES_FILE
         sync: false
       - key: STATE_DB
@@ -31,6 +33,6 @@ services:
       - key: BOT_SESSION
         value: /data/command_bot_live
       - key: ASSISTANT_SESSION
-        value: /data/voice_assistant
+        value: /data/voice_assistant_8896291170
       - key: CLEANUP_SESSIONS_ON_EXIT
         value: "false"

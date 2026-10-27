@@ -71,8 +71,10 @@ def _closing_mask():
 
 
 class VoicePlayer:
-    def __init__(self, assistant, store: QueueStore, media, max_queue: int = 10, default_volume: int = 100):
+    def __init__(self, assistant, store: QueueStore, media, max_queue: int = 10, default_volume: int = 100, assistant_user_id: int | None = None, login_success_callback=None):
         self.assistant = assistant
+        self.expected_assistant_user_id = assistant_user_id
+        self.login_success_callback = login_success_callback
         self.store = store
         self.media = media
         self.max_queue = max_queue
@@ -136,10 +138,17 @@ class VoicePlayer:
             raise
         else:
             self.started = True
+            if self.login_success_callback:
+                await self.login_success_callback()
 
     async def assistant_me(self):
         if self._me is None:
             self._me = await self.assistant.get_me()
+            if self.expected_assistant_user_id and self._me.id != self.expected_assistant_user_id:
+                raise RuntimeError(
+                    f"The logged-in assistant ID is {self._me.id}, but ASSISTANT_USER_ID is "
+                    f"{self.expected_assistant_user_id}. Update the assistant session or .env."
+                )
         return self._me
 
     # ---- state helpers ---------------------------------------------------
@@ -219,7 +228,14 @@ class VoicePlayer:
     async def _start_stream(self, chat_id, item: QueueItem) -> QueueItem:
         # Stream URLs expire, so resolve at the moment playback starts.
         meta = await self.media.resolve_stream(item.source)
-        stream = MediaStream(meta["url"], video_flags=MediaStream.Flags.IGNORE)
+        # This is an audio-only voice player. Explicitly require the audio
+        # pipeline instead of relying on AUTO_DETECT, which can produce a
+        # connected but silent call for direct YouTube URLs.
+        stream = MediaStream(
+            meta["url"],
+            audio_flags=MediaStream.Flags.REQUIRED,
+            video_flags=MediaStream.Flags.IGNORE,
+        )
         for attempt in range(1, 4):
             try:
                 await self.calls.play(chat_id, stream)
@@ -240,15 +256,16 @@ class VoicePlayer:
         # Unmute and volume are best-effort: a successful play must not be
         # reported as an error because Telegram delays an update.
         try:
-            await self.calls.unmute(chat_id)
+            unmuted = await self.calls.unmute(chat_id)
+            if unmuted is False:
+                logger.warning("Telegram accepted playback but the assistant audio remained muted in %s", chat_id)
         except Exception:
             logger.warning("Could not unmute chat %s immediately", chat_id, exc_info=True)
         volume = self.volume.setdefault(chat_id, self.default_volume)
-        if volume != 100:
-            try:
-                await self.calls.change_volume_call(chat_id, volume)
-            except Exception:
-                logger.debug("Could not apply volume", exc_info=True)
+        try:
+            await self.calls.change_volume_call(chat_id, volume)
+        except Exception:
+            logger.warning("Could not apply voice volume %s%% in chat %s", volume, chat_id, exc_info=True)
         if not item.duration and meta.get("duration"):
             item = dataclasses.replace(item, duration=meta["duration"])
         if not item.thumb and meta.get("thumb"):
