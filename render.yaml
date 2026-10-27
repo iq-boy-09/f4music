@@ -1,0 +1,36 @@
+services:
+  - type: worker
+    name: f4-music
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    disk:
+      name: f4-music-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: OWNER_IDS
+        sync: false
+      - key: SUPEROWNER_IDS
+        sync: false
+      - key: ASSISTANT_PHONE
+        sync: false
+      - key: COOKIES_FILE
+        sync: false
+      - key: STATE_DB
+        value: /data/musicbot.sqlite3
+      - key: DOWNLOAD_DIR
+        value: /data/downloads
+      - key: BOT_SESSION
+        value: /data/command_bot_live
+      - key: ASSISTANT_SESSION
+        value: /data/voice_assistant
+      - key: CLEANUP_SESSIONS_ON_EXIT
+        value: "false"

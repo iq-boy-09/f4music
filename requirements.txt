@@ -1,0 +1,9 @@
+# PyTgCalls 3.x needs Telegram's newer conference-call raw API. Pyrofork
+# keeps the `pyrogram` import path while providing those newer methods.
+pyrofork==2.3.69
+py-tgcalls==3.0.0rc3
+yt-dlp[default]
+python-dotenv
+Pillow>=11.0
+# Optional speedup: requires Microsoft C++ Build Tools on Python 3.13.
+TgCrypto>=1.2.5

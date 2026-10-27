@@ -1,0 +1,10 @@
+.env
+.venv
+*.session
+*.session-journal
+*.sqlite3
+downloads
+__pycache__
+*.py[cod]
+.git
+.vscode

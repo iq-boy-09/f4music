@@ -1,0 +1,8 @@
+services:
+  f4-music:
+    build: .
+    env_file:
+      - .env
+    restart: unless-stopped
+    volumes:
+      - ./:/app
