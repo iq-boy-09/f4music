@@ -1,94 +1,255 @@
-# 🎧 F4 Music Bot
+<p align="center">
+  <img src="assets/f4_music_banner.svg" alt="F4 Music animated banner" width="900">
+</p>
 
-A Telegram music bot that streams YouTube audio into group voice chats, searches with tap-to-pick results, and sends MP3s/videos in private chat. The bot account handles commands; a separate Telegram **assistant user session** publishes audio into calls (Bot API accounts cannot).
+<p align="center">
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.12%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12+"></a>
+  <a href="https://core.telegram.org/bots/api"><img src="https://img.shields.io/badge/Telegram-Bot%20API-26A5E4?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram Bot API"></a>
+  <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/Docker-ready-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker ready"></a>
+</p>
 
-## Quick start (Python 3.12+)
+# F4 Music Bot
 
-```bash
-python3 -m venv .venv && source .venv/bin/activate     # Windows: .\.venv\Scripts\Activate.ps1
+F4 Music is a Telegram music bot for searching tracks, playing them in group voice chats, sending MP3s/videos in private chat, and managing access through credits, Premium, referrals, force-join, and an owner/admin panel.
+
+<p align="center"><i>Search it. Queue it. Feel it.</i><br>✦ High-Res · Max-Bass · Zero-Lag ✦</p>
+
+## About the creator
+
+F4 Music is created and maintained by **[@f4did](https://t.me/f4did)**. If you reuse, deploy, modify, showcase, or build on this project, keep visible credit to **@f4did**. The bot’s media captions already include the credit automatically.
+
+Please do not remove, hide, or replace the author credit when redistributing this project.
+
+## What it includes
+
+| Area | Included |
+| --- | --- |
+| Music | YouTube search, MP3, video, playlists, related tracks, Song Studio MP3 cache |
+| Voice chat | Assistant-user streaming, queue, pause, resume, skip, loop, shuffle, volume |
+| UI | Animated README banner, branded start cards, player thumbnail template, compact result buttons |
+| Access | Daily credits at 00:01 IST, Premium, redeem codes, referrals, force-join verification |
+| Management | Owner/admin panel, admin list, broadcasts, group broadcasts, usage logs, payment QR |
+| Safety | 455 MB video limit, failed-download credit protection, YouTube cookie support, flood-safe progress edits |
+
+## Screenshots and UI
+
+The bot uses a branded F4 Music start card, inline search results, and a live player card with the current thumbnail. The animated banner above is stored locally at [`assets/f4_music_banner.svg`](assets/f4_music_banner.svg), so it remains available when the repository is mirrored.
+
+## Requirements
+
+- Python 3.12 or newer
+- FFmpeg
+- Telegram API ID and API hash from [my.telegram.org](https://my.telegram.org)
+- Bot token from [@BotFather](https://t.me/BotFather)
+- A normal Telegram assistant account for voice-chat playback
+- A YouTube cookies file or browser-cookie setting if YouTube asks for verification
+
+## 1. Windows installation
+
+Open PowerShell in the project folder:
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-cp .env.example .env                                   # Windows: Copy-Item .env.example .env
+winget install Gyan.FFmpeg.Shared
+```
+
+If PowerShell blocks activation:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+Copy `.env.example` to `.env`, fill in your values, and start:
+
+```powershell
+Copy-Item .env.example .env
 python bot.py
 ```
 
-Fill in `API_ID`, `API_HASH`, `BOT_TOKEN` in `.env`. On the first `/play` Telegram asks for the assistant account's phone, code and 2FA password. FFmpeg must be installed for MP3/video downloads. Installing Deno or Node.js helps yt-dlp with YouTube.
+Do not commit `.env`, Telegram session files, cookies, or the SQLite database. On the first voice-chat run, complete the assistant login code and 2FA prompt in the terminal.
 
-## What's new
+## 2. Linux installation
 
-- **Live player card** with thumbnail, progress bar, loop/volume status and requester; a fresh card appears automatically when the next song starts, and the old one collapses to "✅ Played".
-- **One-tap controls**: pause/resume toggle, skip, stop, loop (off/track/queue), shuffle, volume ±, queue, refresh.
-- **Interactive queue editor** with per-song ✖ remove, shuffle and clear.
-- **Search with results** (`/search`, or just message the bot in private) and **history** with one-tap replay.
-- **Playlist links** and `/auto` that builds a queue from YouTube's mix of related songs.
-- **Auto-join**: the assistant joins the group by invite link when possible.
-- Streams are resolved when a song *starts*, so long queues never hit expired URLs; unplayable queued songs are skipped with a notice.
-- Download progress, a download queue, cooldowns, max song length, owner list and `/broadcast`.
-- Robust HTML formatting (song titles with `_ * \`` no longer break messages).
+Ubuntu/Debian:
 
-## Commands
+```bash
+sudo apt update
+sudo apt install -y git python3 python3-venv python3-pip ffmpeg build-essential
+git clone YOUR_REPOSITORY_URL f4-music
+cd f4-music
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+cp .env.example .env
+nano .env
+python bot.py
+```
 
-| Command | Use |
-| --- | --- |
-| `/start`, `/help` | Interactive menu |
-| `/play <song or link>` | Play or queue (reply to a message to use its text) |
-| `/search <song>` | Pick from 5 results |
-| `/auto <song>` | Queue the song plus related tracks |
-| `/now`, `/queue` | Player card, queue editor |
-| `/pause`, `/resume`, `/skip`, `/stop`, `/leave` | Playback control |
-| `/loop [off\|one\|all]`, `/shuffle`, `/volume <1-200>` | Playback modes |
-| `/remove <n>`, `/clear`, `/history` | Queue tools |
-| `/send <song>`, `/video [720p] <song>` | Download (needs `PRIVATE_DOWNLOADS=true`) |
-| `/setup`, `/ping`, `/stats` | Info |
-| `/broadcast <text>` | Owner/admin broadcast to registered users and groups |
-| `/panel` | Owner/admin management panel (private chat) |
-| `/balance`, `/redeem <code>` | Credits for private-chat searches/downloads |
-| `/claim [plan/amount]` | Submit a payment claim for owner/admin review |
-| `/premium <user_id> <1d\|2d\|7d\|perma>` | Owner/admin premium access |
-| `/addcredits <user_id> <amount>` | Owner/admin payment verification and credit grant |
-| `/code <credits> [uses]` | Owner/admin redeem-code generation |
-| `/setqr` | Owner sets the payment QR by replying to an image |
-| `/logs [user_id]` | Owner usage logs |
-| `/broadcastgc <chat_id> <text>` | Owner/admin group-only broadcast; reply to any media to copy it |
+For a long-running Linux server, use the included Docker setup or run the bot with `systemd`/`supervisord`. Keep the assistant session and `musicbot.sqlite3` on persistent storage.
 
-Old aliases (`/gplay`, `/gqueue`, `/gskip`, …) still work. Controls work for people in the voice chat, group admins, the song's requester, and owners.
+## 3. Docker and Fadehost deployment
 
-## Telegram setup
+The repository includes [`Dockerfile`](Dockerfile), [`docker-compose.yml`](docker-compose.yml), and [`Procfile`](Procfile).
 
-1. Create an API ID/hash at `my.telegram.org` and a bot token with `@BotFather`.
-2. Add the bot to the group and promote it with **Manage video chats** and **Invite users**.
-3. Start the voice chat, then `/play`. If the assistant can't auto-join, add it to the group once.
+### Docker Compose
 
-## Configuration
-
-See `.env.example`; every option is commented. Notable: `OWNER_IDS`, `SUPEROWNER_IDS`, `MAX_QUEUE`, `MAX_DURATION_MINUTES`, `COOKIES_FILE` or `COOKIES_FROM_BROWSER=chrome` (fixes YouTube "confirm you're not a bot"), and `CLEANUP_SESSIONS_ON_EXIT=false` to stay logged in. Private users receive 10 daily credits; group searches remain unlimited after the user starts the bot in DM and passes configured force-join checks.
-
-If YouTube asks for sign-in, log into YouTube in Chrome/Edge/Firefox, close that browser, set `COOKIES_FROM_BROWSER=chrome` in `.env`, and restart the bot. Alternatively export a Netscape `cookies.txt` file and set `COOKIES_FILE`.
-
-## Hosting
-
-The repository includes a `Dockerfile`, `docker-compose.yml`, and `Procfile`.
-
-For Docker Compose, keep your existing `.env` in the project directory and run:
+Keep your existing `.env` beside `docker-compose.yml`; its values are not replaced by the project:
 
 ```bash
 docker compose up -d --build
+docker compose logs -f f4-music
 ```
 
-The Compose volume keeps `musicbot.sqlite3`, Telegram session files, downloads, and the Song Studio cache persistent. Do not remove your existing `.env` values. For a worker-based host, use the `Procfile` command `python bot.py` and configure the same environment variables from `.env` in the host dashboard.
+The Compose volume keeps the database, Telegram sessions, downloads, and Song Studio cache persistent.
 
-Before starting on a new host, copy the logged-in assistant session if one already exists, or run the first start from an interactive console so Pyrogram can complete the assistant login. Set `CLEANUP_SESSIONS_ON_EXIT=false` for persistent hosting.
+### Fadehost or another Docker host
 
-## Layout
+1. Create a new Docker application/service.
+2. Upload or connect this repository.
+3. Build from `Dockerfile`.
+4. Add the same environment variables from your local `.env` in the host dashboard.
+5. Attach persistent storage and mount it at `/app`, or configure `STATE_DB`, `DOWNLOAD_DIR`, `BOT_SESSION`, and `ASSISTANT_SESSION` to the mounted path.
+6. Start the container with `python bot.py`.
+7. Check logs and complete the assistant login once if the host provides an interactive console.
+
+If the host is worker-based instead of Docker-based, use the Procfile process:
 
 ```text
-bot.py              # launcher
-musicbot/
-  config.py         # environment configuration
-  handlers.py       # commands, cards, buttons
-  main.py           # clients, lifecycle, instance lock
-  media.py          # yt-dlp search / stream / downloads
-  state.py          # SQLite queue, history, users
-  voice.py          # PyTgCalls playback engine
+python bot.py
 ```
 
-Use media you are authorized to play or download. Generated files (`.venv`, sessions, `musicbot.sqlite3`, downloads) are git-ignored.
+## 4. Render deployment
+
+Use a **Background Worker**, not a web service: this bot listens to Telegram and does not expose an HTTP port. The included [`render.yaml`](render.yaml) is a Render Blueprint with a Docker build and persistent `/data` disk.
+
+### Blueprint method
+
+1. Push the repository to GitHub/GitLab.
+2. In Render, choose **New → Blueprint** and select the repository.
+3. Confirm `render.yaml`.
+4. Enter the secret values marked `sync: false`.
+5. Deploy the worker.
+6. Confirm the persistent disk is mounted at `/data`.
+7. Watch the deploy logs and verify `Bot is live`.
+
+### Dashboard method
+
+1. Choose **New → Background Worker** and connect the repository.
+2. Select Docker and use the repository `Dockerfile`.
+3. Add your `.env` values under Environment. Render can bulk-import a valid `.env` file from the Environment page.
+4. Add a persistent disk mounted at `/data`.
+5. Set these persistent paths:
+
+```env
+STATE_DB=/data/musicbot.sqlite3
+DOWNLOAD_DIR=/data/downloads
+BOT_SESSION=/data/command_bot_live
+ASSISTANT_SESSION=/data/voice_assistant
+CLEANUP_SESSIONS_ON_EXIT=false
+```
+
+6. Deploy and inspect the worker logs.
+
+Render filesystems are ephemeral without a persistent disk, so sessions and SQLite data must live under `/data`. A disk is single-instance storage; do not scale this bot to multiple instances.
+
+## YouTube verification and cookies
+
+If YouTube shows `Sign in to confirm you’re not a bot`, use one of these options:
+
+```env
+# Computer with a logged-in browser:
+COOKIES_FROM_BROWSER=chrome
+
+# Render/Fadehost with a Netscape cookies file:
+COOKIES_FILE=/data/cookies.txt
+```
+
+Close the browser before yt-dlp reads its cookie database. Never commit `cookies.txt`. See the official [yt-dlp cookie guide](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
+
+## Telegram setup checklist
+
+1. Create an API ID/hash at [my.telegram.org](https://my.telegram.org).
+2. Create a bot with [@BotFather](https://t.me/BotFather).
+3. Add the bot to your group and grant the required admin permissions.
+4. Add/configure the assistant account for voice playback.
+5. Start a voice chat before using `/play`.
+6. Add the Song Studio channel ID `-1003853614558` and make the bot an admin if you want MP3 caching.
+7. Configure `OWNER_IDS` before using `/panel`.
+
+## Commands
+
+### Visible command menu
+
+`/start` · `/send` · `/video` · `/play` · `/search` · `/ping` · `/help`
+
+The full command list is intentionally inside `/help` so the Telegram command menu stays clean.
+
+### User commands
+
+| Command | Use |
+| --- | --- |
+| `/start` | Open the branded menu and verify force-join |
+| `/search <song>` | Search five results and choose Play, Music, or Video |
+| `/send <song or link>` | Send an MP3; one successful private result costs one credit |
+| `/video [quality] <song or link>` | Send a video; files above 455 MB are rejected |
+| `/play <song or link>` | Play or queue music in a group voice chat |
+| `/balance` | View credits, Premium, admin, or owner status |
+| `/redeem <code>` | Redeem credits issued by management |
+| `/refer` | View the referral link and referral rewards |
+| `/help` | Show all available commands and usage |
+
+### Group player commands
+
+`/auto`, `/now`, `/queue`, `/pause`, `/resume`, `/skip`, `/stop`, `/leave`, `/loop`, `/shuffle`, `/volume`, `/remove`, `/clear`, `/history`
+
+### Owner/admin commands
+
+`/panel`, `/adminlist`, `/addadmin`, `/deladmin`, `/premium`, `/addcredits`, `/code`, `/forcejoin`, `/unforcejoin`, `/broadcast`, `/broadcastgc`, `/logs`, `/setqr`
+
+Use `/help` inside Telegram for current descriptions and role-specific tools.
+
+## Credits and Premium
+
+- Private users receive 10 credits daily at 00:01 IST.
+- A failed search/download does not deduct credits.
+- Groups have unlimited search and playback after verification.
+- Premium users receive unlimited access and do not see purchase prompts.
+- MP3s cached in Song Studio are forwarded quickly without re-downloading.
+
+## Configuration
+
+Every setting is documented in [`.env.example`](.env.example). Keep your existing `.env` values when updating the project. Important hosting values include:
+
+```env
+OWNER_IDS=your_telegram_user_id
+PRIVATE_DOWNLOADS=true
+CLEANUP_SESSIONS_ON_EXIT=false
+```
+
+Never publish `API_HASH`, `BOT_TOKEN`, assistant phone details, cookies, or session files. If a bot token has ever been posted publicly, revoke it with BotFather and create a replacement.
+
+## Project layout
+
+```text
+bot.py                         # launcher
+musicbot/handlers.py           # commands, cards, buttons, UI
+musicbot/main.py               # clients and lifecycle
+musicbot/media.py              # yt-dlp search, stream, downloads
+musicbot/state.py              # SQLite users, credits, queue, cache
+musicbot/voice.py              # PyTgCalls playback engine
+assets/f4_music_banner.svg     # animated README banner
+assets/player_template.png     # player card template
+Dockerfile                     # production container
+docker-compose.yml             # persistent local/container hosting
+render.yaml                    # Render worker blueprint
+Procfile                       # worker-host fallback
+```
+
+## Legal and attribution
+
+Use only media you are authorized to play or download. Respect Telegram and YouTube rules. Keep the visible **@f4did** credit in every reuse or hosted copy of F4 Music.
