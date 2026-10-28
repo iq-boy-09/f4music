@@ -9,6 +9,8 @@ WORKDIR /app
 # compile on platforms where a prebuilt wheel is unavailable.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg build-essential ca-certificates \
+    && chmod 755 /usr/bin/ffmpeg /usr/bin/ffprobe \
+    && /usr/bin/ffmpeg -hide_banner -version >/dev/null \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./

@@ -211,9 +211,9 @@ The full command list is intentionally inside `/help` so the Telegram command me
 | Command | Use |
 | --- | --- |
 | `/start` | Open the branded menu and verify force-join |
-| `/search <song>` | Search five results and choose Play, Music, or Video |
-| `/send <song or link>` | Send an MP3; one successful private result costs 1 credit by default |
-| `/video [quality] <song or link>` | Send a video; costs 2 credits by default, defaults to 480p, and retries 360p if too large |
+| `/search <song>` | Search five results in private chat or groups and choose Play, Music, or Video |
+| `/send <song or link>` | Send an MP3; private results cost 1 credit by default, group results are free |
+| `/video [quality] <song or link>` | Send a video; private results cost 2 credits by default, group results are free |
 | `/play <song or link>` | Play or queue music in a group voice chat |
 | `/balance` | View credits, Premium, admin, or owner status in private chat or groups |
 | `/redeem <code>` | Redeem credits issued by management |

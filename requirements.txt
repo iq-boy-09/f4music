@@ -1,7 +1,8 @@
 # PyTgCalls 3.x needs Telegram's newer conference-call raw API. Pyrofork
 # keeps the `pyrogram` import path while providing those newer methods.
 pyrofork==2.3.69
-py-tgcalls==3.0.0rc3
+# Stable release fixes native FFmpeg process launching on Linux containers.
+py-tgcalls==3.0.0
 yt-dlp[default]
 python-dotenv
 requests>=2.31.0

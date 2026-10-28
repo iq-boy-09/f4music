@@ -63,7 +63,7 @@ GROUP_COMMANDS = [
     "remove", "clear", "history", "playlist",
 ]
 DM_ONLY_COMMANDS = [
-    "send", "mp3", "video", "search", "s", "redeem", "claim", "refer",
+    "redeem", "claim", "refer",
     "panel", "adminlist", "addadmin", "deladmin", "premium", "addcredits", "credit",
     "code", "forcejoin", "unforcejoin", "logs", "broadcast", "broadcastgc", "setqr",
     "setcookies", "delcookies", "setproxy", "delproxy", "assistant", "setassistant",
@@ -97,13 +97,13 @@ def help_text(in_group: bool, manager: bool = False) -> str:
         "<b>F4 MUSIC HELP</b>\n\n"
         "<b>Everywhere</b>\n"
         "/start — open the music menu\n"
-        "/send <i>song or link</i> — get an MP3 (private chat)\n"
-        "/video <i>song or link</i> — get a video (private chat)\n"
+        "/send <i>song or link</i> — get an MP3\n"
+        "/video <i>song or link</i> — get a video\n"
         "/play <i>song or link</i> — play in a group voice chat\n"
         "/ping — check response time\n"
         "/help — show this guide\n\n"
         "<b>Search and account</b>\n"
-        "/search <i>song</i> — show five results (private chat)\n"
+        "/search <i>song</i> — show five results\n"
         "Send a song name or link directly in private chat.\n"
         "/balance — view credits or premium status (DM or group)\n"
         "/redeem <i>code</i> — claim credits in private chat\n"
@@ -120,7 +120,7 @@ def help_text(in_group: bool, manager: bool = False) -> str:
             "/playlist <i>add|list|send|remove|clear</i> — group smart-next favorites\n"
         )
     else:
-        text += "<b>Private chat</b>\nMP3 costs 1 credit and video costs 2 by default. Groups have unlimited searches and playback.\n"
+        text += "<b>Credits</b>\nPrivate audio costs 1 credit and private video costs 2 by default. Group searches, audio, and playback are free.\n"
     if manager:
         text += (
             "\n<b>Manager tools</b>\n"
@@ -2323,7 +2323,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
     # ---------------------------------------------------------------------
     # search + downloads
     # ---------------------------------------------------------------------
-    @app.on_message(filters.private & filters.command(["search", "s"]))
+    @app.on_message(filters.command(["search", "s"]))
     async def search_command(client, message):
         query = get_query(message)
         if not query:
@@ -2341,14 +2341,14 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         """Show play, MP3, and video choices when a link is pasted in a GC."""
         await show_results(client, message, message.text.strip()[:500])
 
-    @app.on_message(filters.private & filters.command(["send", "mp3"]))
+    @app.on_message(filters.command(["send", "mp3"]))
     async def send_command(client, message):
         query = get_query(message)
         if not query:
             return await message.reply("Usage: <code>/send song name</code>")
         await media_command(client, message, "audio", query)
 
-    @app.on_message(filters.private & filters.command(["video"]))
+    @app.on_message(filters.command(["video"]))
     async def video_command(client, message):
         args = message.command[1:]
         height = DEFAULT_VIDEO_HEIGHT
