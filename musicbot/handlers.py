@@ -1713,10 +1713,13 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
     async def delete_cookies_command(client, message):
         if not manager_only(message):
             return await message.reply("⛔ Owner/admin access only.")
-        cookie_path = cfg.download_dir / "cookies.txt"
         try:
+            cookie_paths = {cfg.download_dir / "cookies.txt"}
+            if media.cookies_file:
+                cookie_paths.add(Path(media.cookies_file))
             media.set_cookies_file(None)
-            cookie_path.unlink(missing_ok=True)
+            for cookie_path in cookie_paths:
+                cookie_path.unlink(missing_ok=True)
             await message.reply("✅ Cookies removed. Downloads are now cookie-less.")
         except Exception as exc:
             await message.reply(f"⚠️ Could not remove cookies: {friendly_error(exc)}")
