@@ -333,10 +333,11 @@ def main():
                 await asyncio.sleep(max(1, (target - now).total_seconds()))
                 for user_id in store.grant_daily_credits():
                     try:
+                        daily = store.get_int_setting("daily_credits", 10, 0, 10000)
                         await bot.send_message(
                             user_id,
                             "🎁 <b>Daily credits added!</b>\n"
-                            "Your account received <b>10 credits</b> for today.\n"
+                            f"Your account received <b>{daily} credits</b> for today.\n"
                             f"Updated balance: <b>{store.user_balance(user_id)}</b> credits.",
                         )
                     except Exception:

@@ -62,6 +62,13 @@ GROUP_COMMANDS = [
     "resume", "gresume", "stop", "gstop", "leave", "gleave", "loop", "shuffle", "volume",
     "remove", "clear", "history", "playlist",
 ]
+DM_ONLY_COMMANDS = [
+    "send", "mp3", "video", "search", "s", "redeem", "claim", "refer",
+    "panel", "adminlist", "addadmin", "deladmin", "premium", "addcredits", "credit",
+    "code", "forcejoin", "unforcejoin", "logs", "broadcast", "broadcastgc", "setqr",
+    "setcookies", "delcookies", "setproxy", "delproxy", "assistant", "setassistant",
+    "clearassistant", "setcost", "creditcosts", "setdaily",
+]
 
 HOME_TEXT = (
     "╭━━━〔 𝐅𝟒 𝐌𝐔𝐒𝐈𝐂 ♪ 〕━━━╮\n"
@@ -69,7 +76,7 @@ HOME_TEXT = (
     "┃  ⚡ High-Res · Max-Bass · Zero-Lag\n"
     "╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
     "💬 <b>Private</b> · Search, MP3 and video\n"
-    "🎁 <b>10 daily credits</b> · one successful result = one credit\n"
+    "🎁 <b>10 daily credits</b> · audio 1 credit · video 2 credits\n"
     "👥 <b>Groups</b> · unlimited voice playback and searches\n\n"
     "✦ Choose your path below ✦\n"
     + CREDIT_LINE
@@ -81,16 +88,16 @@ def help_text(in_group: bool, manager: bool = False) -> str:
         "<b>F4 MUSIC HELP</b>\n\n"
         "<b>Everywhere</b>\n"
         "/start — open the music menu\n"
-        "/send <i>song or link</i> — get an MP3\n"
-        "/video <i>song or link</i> — get a video\n"
+        "/send <i>song or link</i> — get an MP3 (private chat)\n"
+        "/video <i>song or link</i> — get a video (private chat)\n"
         "/play <i>song or link</i> — play in a group voice chat\n"
         "/ping — check response time\n"
         "/help — show this guide\n\n"
         "<b>Search and account</b>\n"
-        "/search <i>song</i> — show five results\n"
+        "/search <i>song</i> — show five results (private chat)\n"
         "Send a song name or link directly in private chat.\n"
-        "/balance — view credits or premium status\n"
-        "/redeem <i>code</i> — claim credits\n"
+        "/balance — view credits or premium status (DM or group)\n"
+        "/redeem <i>code</i> — claim credits in private chat\n"
         "/refer — view your referral link\n\n"
     )
     if in_group:
@@ -104,7 +111,7 @@ def help_text(in_group: bool, manager: bool = False) -> str:
             "/playlist <i>add|list|send|remove|clear</i> — group smart-next favorites\n"
         )
     else:
-        text += "<b>Private chat</b>\nMP3 and video downloads use one credit per successful result. Groups have unlimited searches and playback.\n"
+        text += "<b>Private chat</b>\nMP3 costs 1 credit and video costs 2 by default. Groups have unlimited searches and playback.\n"
     if manager:
         text += (
             "\n<b>Manager tools</b>\n"
@@ -112,6 +119,7 @@ def help_text(in_group: bool, manager: bool = False) -> str:
             "/addcredits · /code · /forcejoin · /unforcejoin\n"
             "/broadcast · /broadcastgc · /logs · /setqr\n"
             "/setcookies · /delcookies · /setproxy · /delproxy\n"
+            "/setcost audio|video|search AMOUNT · /creditcosts · /setdaily AMOUNT\n"
         )
     return text + "\n" + CREDIT_LINE
 
@@ -344,7 +352,8 @@ def panel_kb():
         [Btn("📊 Overview", callback_data="panel:stats"), Btn("👤 Users", callback_data="panel:users")],
         [Btn("💎 Premium", callback_data="panel:premium"), Btn("🛡 Admins", callback_data="panel:admins")],
         [Btn("👥 Groups", callback_data="panel:groups"), Btn("📢 Force Join", callback_data="panel:channels")],
-        [Btn("🍪 Cookies", callback_data="panel:cookies"), Btn("⚙️ Settings", callback_data="panel:settings")],
+        [Btn("🍪 Cookies", callback_data="panel:cookies"), Btn("💳 Credits", callback_data="panel:credits")],
+        [Btn("⚙️ Settings", callback_data="panel:settings")],
         [Btn("📣 Broadcast", callback_data="panel:broadcast"), Btn("🧾 Logs & Commands", callback_data="panel:help")],
         [Btn("🏠 Home", callback_data="panel:back")],
     ])
@@ -609,13 +618,20 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
     def manager_only(message) -> bool:
         return bool(message.from_user and is_manager(message.from_user.id))
 
+    def credit_cost(kind: str) -> int:
+        default = 2 if kind == "video" else 1
+        return store.get_int_setting(f"credit_cost_{kind}", default, 0, 100)
+
+    def daily_credit_amount() -> int:
+        return store.get_int_setting("daily_credits", 10, 0, 10000)
+
     async def user_access(client, chat, uid, require_dm_for_group=True):
         """Return a human-readable access error, or None when allowed."""
         if is_manager(uid) or store.is_premium(uid):
             return None
         if chat.type == ChatType.PRIVATE:
             store.register_user(uid)
-            store.daily_credits(uid)
+            store.daily_credits(uid, daily_credit_amount())
         elif require_dm_for_group:
             if not store.has_user(uid):
                 return "💬 <b>Start me in private first</b> to unlock music in this group.\nThen come back here and try again."
@@ -654,7 +670,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         if balance < cost:
             await message.reply(
                 f"💳 You need <b>{cost}</b> credits, but have <b>{balance}</b>.\n"
-                "You receive 10 credits daily. Use /redeem CODE for more."
+                f"You receive {daily_credit_amount()} credits daily. Use /redeem CODE for more."
             )
             return False
         return True
@@ -1175,7 +1191,8 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         if not cfg.private_downloads:
             return await message.reply("🚫 Downloads are disabled in this bot's configuration.")
         uid, _ = who(message)
-        if not await credit_gate(client, message, 1):
+        cost = credit_cost(kind)
+        if not await credit_gate(client, message, cost):
             return
         if wait := cooldown_left(uid):
             return await message.reply(f"⏳ Easy there — try again in {wait}s.")
@@ -1184,7 +1201,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
             if kind == "audio":
                 delivered = await copy_studio_audio(client, message.chat.id, status, query)
                 if delivered:
-                    charged = 0 if message.chat.type in GROUP_TYPES or store.is_premium(uid) else 1
+                    charged = 0 if message.chat.type in GROUP_TYPES or store.is_premium(uid) else cost
                     if charged:
                         store.consume_credits(uid, charged)
                     store.log_usage(uid, message.chat.id, kind, query, True, charged)
@@ -1195,7 +1212,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
             delivered = await deliver(
                 client, message.chat.id, status, meta, kind, height, quality_locked
             )
-            charged = 0 if message.chat.type in GROUP_TYPES or store.is_premium(uid) else 1
+            charged = 0 if message.chat.type in GROUP_TYPES or store.is_premium(uid) else cost
             if delivered and charged:
                 store.consume_credits(uid, charged)
             store.log_usage(uid, message.chat.id, kind, query, delivered, charged if delivered else 0)
@@ -1220,7 +1237,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
             return await edit_card(status, f"⚠️ Search failed.\n{friendly_error(exc)}")
         charged = 0
         if not is_group and not store.is_premium(uid):
-            charged = len(results)
+            charged = store.get_int_setting("credit_cost_search", 0, 0, 100)
             if not store.consume_credits(uid, charged):
                 return await edit_card(status, "💳 Not enough credits for these results. Use /balance or /redeem CODE.")
         store.log_usage(uid, message.chat.id, "search", query, True, charged)
@@ -1420,7 +1437,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
             lines.append(f"🛡 <code>{uid}</code> · {('@' + username) if username else 'no username'} · ADMIN")
         await message.reply(("\n".join(lines) if len(lines) > 2 else "🛡 <b>No added admins yet.</b>") + "\n\n" + CREDIT_LINE)
 
-    @app.on_callback_query(filters.regex(r"^panel:(home|back|stats|users|premium|admins|groups|channels|cookies|settings|broadcast|help)$"))
+    @app.on_callback_query(filters.regex(r"^panel:(home|back|stats|users|premium|admins|groups|channels|cookies|credits|settings|broadcast|help)$"))
     async def panel_callback(client, callback):
         if not callback.from_user or not is_manager(callback.from_user.id):
             return await safe_callback_answer(callback, "Owner/admin access only.", show_alert=True)
@@ -1505,6 +1522,23 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
                 "Reply to a Netscape cookies.txt document with <code>/setcookies</code> "
                 "or use <code>/delcookies</code> to return to cookie-less mode."
             )
+        elif key == "credits":
+            audio_cost = credit_cost("audio")
+            video_cost = credit_cost("video")
+            search_cost = store.get_int_setting("credit_cost_search", 0, 0, 100)
+            daily = daily_credit_amount()
+            text = (
+                "💳 <b>Credit rules</b>\n"
+                f"🎵 Audio: <code>{audio_cost}</code> credit(s)\n"
+                f"🎬 Video: <code>{video_cost}</code> credit(s)\n"
+                f"🔎 Search: <code>{search_cost}</code> credit(s)\n"
+                f"🎁 Daily refill: <code>{daily}</code> credit(s)\n\n"
+                "Change them with:\n"
+                "<code>/setcost audio AMOUNT</code>\n"
+                "<code>/setcost video AMOUNT</code>\n"
+                "<code>/setcost search AMOUNT</code>\n"
+                "<code>/setdaily AMOUNT</code>"
+            )
         elif key == "settings":
             text = (
                 "⚙️ <b>Runtime settings</b>\n"
@@ -1517,12 +1551,22 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
             text = "📣 Use <code>/broadcast</code> with text or reply to any message.\nUse <code>/broadcastgc CHAT_ID</code> for one group."
         else:
             text = (
-                "🧾 <b>Admin commands</b>\n"
-                "/addadmin USER_ID\n/deladmin USER_ID\n/forcejoin @channel\n"
-                "/unforcejoin CHAT_ID\n/premium USER_ID 1d|2d|7d|perma\n"
-                "/code CREDITS [USES]\n/redeem CODE\n/balance\n/logs [USER_ID]\n"
-                "/broadcast TEXT or reply to media\n/broadcastgc CHAT_ID TEXT\n"
-                "/setcookies (reply to cookies.txt)\n/setproxy HOST PORT SECRET"
+                "🧾 <b>All bot commands</b>\n\n"
+                "<b>Private</b>\n/start · /menu · /help · /send · /mp3 · /video · /search · /s\n"
+                "/balance · /redeem · /claim · /refer · /ping · /setup · /stats\n\n"
+                "<b>Groups</b>\n/start · /menu · /help · /balance · /play · /gplay · /p · /auto\n"
+                "/now · /queue · /gqueue · /history · /pause · /gpause · /resume · /gresume\n"
+                "/skip · /gskip · /stop · /gstop · /leave · /gleave · /loop · /shuffle · /volume\n"
+                "/remove · /clear · /playlist · /ping · /setup · /stats\n\n"
+                "<b>Manager / owner</b>\n"
+                "<b>Accounts</b>\n/addadmin · /deladmin · /adminlist\n"
+                "/premium USER_ID 1d|2d|7d|perma\n/addcredits USER_ID AMOUNT\n"
+                "/code CREDITS [USES] · /logs [USER_ID]\n\n"
+                "<b>Credits & access</b>\n/balance · /setcost audio|video|search AMOUNT\n"
+                "/creditcosts · /setdaily AMOUNT\n/forcejoin @channel · /unforcejoin CHAT_ID\n\n"
+                "<b>Operations</b>\n/panel · /broadcast · /broadcastgc CHAT_ID TEXT\n"
+                "/setcookies · /delcookies · /setproxy · /delproxy · /setqr\n"
+                "/assistant · /setassistant PHONE USER_ID · /clearassistant"
             )
         if callback.message:
             await edit_card(callback.message, text + "\n\n" + CREDIT_LINE, panel_kb())
@@ -1671,6 +1715,51 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
             )
         except Exception:
             logger.debug("Could not notify credited user %s", uid, exc_info=True)
+
+    @app.on_message(filters.private & filters.command(["setcost"]))
+    async def set_cost_command(client, message):
+        if not manager_only(message):
+            return await message.reply("⛔ Owner/admin access only.")
+        if len(message.command) != 3 or message.command[1].lower() not in {"audio", "video", "search"}:
+            return await message.reply(
+                "Usage: <code>/setcost audio AMOUNT</code>\n"
+                "<code>/setcost video AMOUNT</code>\n"
+                "<code>/setcost search AMOUNT</code>"
+            )
+        try:
+            amount = int(message.command[2])
+        except ValueError:
+            amount = -1
+        if not 0 <= amount <= 100:
+            return await message.reply("Amount must be between 0 and 100 credits.")
+        kind = message.command[1].lower()
+        store.set_setting(f"credit_cost_{kind}", amount, message.from_user.id)
+        await message.reply(f"✅ {kind.title()} deduction is now <b>{amount}</b> credit(s).")
+
+    @app.on_message(filters.private & filters.command(["creditcosts"]))
+    async def credit_costs_command(client, message):
+        if not manager_only(message):
+            return await message.reply("⛔ Owner/admin access only.")
+        await message.reply(
+            "💳 <b>Current credit settings</b>\n"
+            f"🎵 Audio: <code>{credit_cost('audio')}</code>\n"
+            f"🎬 Video: <code>{credit_cost('video')}</code>\n"
+            f"🔎 Search: <code>{store.get_int_setting('credit_cost_search', 0, 0, 100)}</code>\n"
+            f"🎁 Daily refill: <code>{daily_credit_amount()}</code>\n\n"
+            "Use /setcost or /setdaily to change them."
+        )
+
+    @app.on_message(filters.private & filters.command(["setdaily"]))
+    async def set_daily_command(client, message):
+        if not manager_only(message):
+            return await message.reply("⛔ Owner/admin access only.")
+        if len(message.command) != 2 or not message.command[1].isdigit():
+            return await message.reply("Usage: <code>/setdaily AMOUNT</code>")
+        amount = int(message.command[1])
+        if not 0 <= amount <= 10000:
+            return await message.reply("Daily refill must be between 0 and 10000 credits.")
+        store.set_setting("daily_credits", amount, message.from_user.id)
+        await message.reply(f"✅ Daily refill is now <b>{amount}</b> credit(s).")
 
     @app.on_message(filters.private & filters.command(["setqr"]))
     async def set_qr_command(client, message):
@@ -1855,17 +1944,28 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         else:
             await message.reply("❌ Invalid or exhausted code.")
 
-    @app.on_message(filters.private & filters.command(["balance"]))
+    @app.on_message((filters.private | filters.group) & filters.command(["balance"]))
     async def balance_command(client, message):
         uid = message.from_user.id
         store.register_user(uid)
-        if is_owner(uid):
-            premium = "👑 owner · unlimited credits"
-        elif is_manager(uid) or store.is_premium(uid):
-            premium = "♾️ unlimited credits"
+        balance = store.user_balance(uid)
+        if store.is_premium(uid):
+            balance_text = "♾️ unlimited · Premium"
+        elif is_owner(uid):
+            balance_text = f"{balance} credits · 👑 owner access"
+        elif is_manager(uid):
+            balance_text = f"{balance} credits · 🛡 admin access"
         else:
-            premium = f"{store.user_balance(uid)} credits"
-        await message.reply(f"💳 Balance: <b>{premium}</b>\nDaily refill: <b>10 credits</b>.")
+            balance_text = f"{balance} credits · 🆓 free plan"
+        location = "👥 Group balance" if message.chat.type in GROUP_TYPES else "💳 Your balance"
+        await message.reply(
+            f"<b>{location}</b>\n\n"
+            f"💰 Available: <b>{balance_text}</b>\n"
+            f"🎁 Daily refill: <b>{daily_credit_amount()} credits</b>\n"
+            f"🎵 Audio: <b>{credit_cost('audio')}</b> credit(s) · "
+            f"🎬 Video: <b>{credit_cost('video')}</b> credit(s)\n\n"
+            "Use /redeem CODE in private chat for more credits."
+        )
 
     @app.on_message(filters.private & filters.command(["logs"]))
     async def logs_command(client, message):
@@ -1956,7 +2056,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
     # ---------------------------------------------------------------------
     # search + downloads
     # ---------------------------------------------------------------------
-    @app.on_message(filters.command(["search", "s"]))
+    @app.on_message(filters.private & filters.command(["search", "s"]))
     async def search_command(client, message):
         query = get_query(message)
         if not query:
@@ -1974,14 +2074,14 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         """Show play, MP3, and video choices when a link is pasted in a GC."""
         await show_results(client, message, message.text.strip()[:500])
 
-    @app.on_message(filters.command(["send", "mp3"]))
+    @app.on_message(filters.private & filters.command(["send", "mp3"]))
     async def send_command(client, message):
         query = get_query(message)
         if not query:
             return await message.reply("Usage: <code>/send song name</code>")
         await media_command(client, message, "audio", query)
 
-    @app.on_message(filters.command(["video"]))
+    @app.on_message(filters.private & filters.command(["video"]))
     async def video_command(client, message):
         args = message.command[1:]
         height = DEFAULT_VIDEO_HEIGHT
@@ -2036,11 +2136,16 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
             return
         if not cfg.private_downloads:
             return await safe_callback_answer(callback, "Downloads are disabled.", show_alert=True)
+        if not await credit_gate(client, callback.message, credit_cost("audio" if mode == "a" else "video")):
+            return await safe_callback_answer(callback, "Not enough credits. Open me in private chat for your balance.", show_alert=True)
         await safe_callback_answer(callback, "⬇️ On it…")
         status = await client.send_message(chat.id, f"🔎 <b>Preparing…</b>\n<i>{esc(meta['title'])}</i>")
         action = "audio" if mode == "a" else "video"
         delivered = await deliver(client, chat.id, status, meta, action)
-        store.log_usage(user.id, chat.id, action, meta["title"], delivered, 0)
+        charged = 0 if chat.type in GROUP_TYPES or store.is_premium(user.id) else credit_cost(action)
+        if delivered and charged:
+            store.consume_credits(user.id, charged)
+        store.log_usage(user.id, chat.id, action, meta["title"], delivered, charged if delivered else 0)
         if delivered:
             picks.drop(token)
             try:
@@ -2060,6 +2165,15 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
                 await bot_username(),
                 show_owner=bool(message.from_user and is_manager(message.from_user.id)),
             ),
+        )
+
+    @app.on_message(filters.group & filters.command(DM_ONLY_COMMANDS))
+    async def dm_only_group_hint(client, message):
+        """Keep private/account/management commands from running in groups."""
+        command = (message.command[0] if message.command else "command").split("@", 1)[0]
+        await message.reply(
+            f"💬 <b>/{esc(command)}</b> is available in private chat only.\n"
+            "Tap the bot's name and send it there. Group playback uses /play."
         )
 
     async def start_play(client, message, auto):

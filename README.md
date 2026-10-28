@@ -212,10 +212,10 @@ The full command list is intentionally inside `/help` so the Telegram command me
 | --- | --- |
 | `/start` | Open the branded menu and verify force-join |
 | `/search <song>` | Search five results and choose Play, Music, or Video |
-| `/send <song or link>` | Send an MP3; one successful private result costs one credit |
-| `/video [quality] <song or link>` | Send a video; defaults to 480p and retries 360p if the file is too large |
+| `/send <song or link>` | Send an MP3; one successful private result costs 1 credit by default |
+| `/video [quality] <song or link>` | Send a video; costs 2 credits by default, defaults to 480p, and retries 360p if too large |
 | `/play <song or link>` | Play or queue music in a group voice chat |
-| `/balance` | View credits, Premium, admin, or owner status |
+| `/balance` | View credits, Premium, admin, or owner status in private chat or groups |
 | `/redeem <code>` | Redeem credits issued by management |
 | `/refer` | View the referral link and referral rewards |
 | `/help` | Show all available commands and usage |
@@ -240,7 +240,9 @@ All members can view the playlist and use `/playlist send NUMBER`. Only group ad
 
 ### Owner/admin commands
 
-`/panel`, `/adminlist`, `/addadmin`, `/deladmin`, `/premium`, `/addcredits`, `/code`, `/forcejoin`, `/unforcejoin`, `/broadcast`, `/broadcastgc`, `/logs`, `/setqr`, `/setcookies`, `/delcookies`, `/setproxy`, `/delproxy`
+`/panel`, `/adminlist`, `/addadmin`, `/deladmin`, `/premium`, `/addcredits`, `/code`, `/forcejoin`, `/unforcejoin`, `/broadcast`, `/broadcastgc`, `/logs`, `/setqr`, `/setcookies`, `/delcookies`, `/setproxy`, `/delproxy`, `/setcost`, `/creditcosts`, `/setdaily`
+
+Credit defaults are 1 credit for audio and 2 for video. Managers can change audio, video, search, and daily-refill values with `/setcost audio AMOUNT`, `/setcost video AMOUNT`, `/setcost search AMOUNT`, and `/setdaily AMOUNT`. The Credits section in `/panel` shows the current values.
 
 Owner-only assistant commands are `/assistant`, `/setassistant PHONE USER_ID`, and `/clearassistant`. Assistant login verification is routed to the owner and includes the requesting group ID. The priority voice group is `-1004220556565`; other groups can use the assistant when that group is inactive.
 
@@ -250,6 +252,8 @@ Use `/help` inside Telegram for current descriptions and role-specific tools.
 
 - Private users receive 10 credits daily at 00:01 IST.
 - A failed search/download does not deduct credits.
+- Private-only commands show a short DM hint when used in a group. `/balance` is intentionally available directly in groups.
+- Premium users bypass force-join checks.
 - Groups have unlimited search and playback after verification.
 - Premium users receive unlimited access and do not see purchase prompts.
 - MP3s cached in Song Studio are forwarded quickly without re-downloading.

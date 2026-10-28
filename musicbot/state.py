@@ -113,6 +113,12 @@ class QueueStore:
                 created_at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_logs(user_id, id);
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                name TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT '',
+                updated_by INTEGER NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS studio_audio (
                 title_key TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -295,7 +301,9 @@ class QueueStore:
     def _today():
         return datetime.now(IST).date().isoformat()
 
-    def daily_credits(self, user_id: int, amount: int = 10):
+    def daily_credits(self, user_id: int, amount: int | None = None):
+        if amount is None:
+            amount = self.get_int_setting("daily_credits", 10, 0, 10000)
         self.register_user(user_id)
         with self._lock:
             today = self._today()
@@ -305,8 +313,10 @@ class QueueStore:
             )
             self._db.commit()
 
-    def grant_daily_credits(self, amount: int = 10):
+    def grant_daily_credits(self, amount: int | None = None):
         """Grant today's refill once and return users who received it."""
+        if amount is None:
+            amount = self.get_int_setting("daily_credits", 10, 0, 10000)
         today = self._today()
         with self._lock:
             rows = self._db.execute(
@@ -325,6 +335,29 @@ class QueueStore:
         with self._lock:
             row = self._db.execute("SELECT credits FROM users WHERE user_id=?", (user_id,)).fetchone()
             return int(row[0]) if row else 0
+
+    # ---- runtime settings -----------------------------------------------
+    def get_setting(self, name: str, default=None):
+        with self._lock:
+            row = self._db.execute("SELECT value FROM bot_settings WHERE name=?", (name,)).fetchone()
+        return row[0] if row else default
+
+    def get_int_setting(self, name: str, default: int, low: int = 0, high: int = 1000) -> int:
+        raw = self.get_setting(name)
+        try:
+            value = int(raw) if raw is not None else int(default)
+        except (TypeError, ValueError):
+            value = int(default)
+        return max(low, min(high, value))
+
+    def set_setting(self, name: str, value, updated_by: int = 0):
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO bot_settings(name,value,updated_by,updated_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                (name, str(value), int(updated_by or 0), time.time()),
+            )
+            self._db.commit()
 
     def is_premium(self, user_id: int) -> bool:
         with self._lock:
