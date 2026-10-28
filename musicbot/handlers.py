@@ -67,7 +67,16 @@ DM_ONLY_COMMANDS = [
     "panel", "adminlist", "addadmin", "deladmin", "premium", "addcredits", "credit",
     "code", "forcejoin", "unforcejoin", "logs", "broadcast", "broadcastgc", "setqr",
     "setcookies", "delcookies", "setproxy", "delproxy", "assistant", "setassistant",
-    "clearassistant", "setcost", "creditcosts", "setdaily",
+    "clearassistant", "setcost", "creditcosts", "setdaily", "assignassistant",
+    "unassignassistant", "assistantall", "assistantlist", "stats",
+    "addassistant", "removeassistant",
+]
+MANAGER_COMMANDS = [
+    "panel", "adminlist", "addadmin", "deladmin", "premium", "addcredits", "credit",
+    "code", "forcejoin", "unforcejoin", "logs", "broadcast", "broadcastgc", "setqr",
+    "setcookies", "delcookies", "setproxy", "delproxy", "assistant", "setassistant",
+    "clearassistant", "setcost", "creditcosts", "setdaily", "assignassistant",
+    "unassignassistant", "assistantall", "assistantlist", "stats", "addassistant", "removeassistant",
 ]
 
 HOME_TEXT = (
@@ -120,6 +129,8 @@ def help_text(in_group: bool, manager: bool = False) -> str:
             "/broadcast · /broadcastgc · /logs · /setqr\n"
             "/setcookies · /delcookies · /setproxy · /delproxy\n"
             "/setcost audio|video|search AMOUNT · /creditcosts · /setdaily AMOUNT\n"
+            "/addassistant · /removeassistant · /assignassistant · /unassignassistant\n"
+            "/assistantall · /assistantlist\n"
         )
     return text + "\n" + CREDIT_LINE
 
@@ -331,7 +342,7 @@ def home_kb(bot_username=None, in_group=False, show_owner=False):
     else:
         rows.extend([
             [Btn("🎛 Player & Setup", callback_data="h:player_setup"), Btn("💎 Premium", callback_data="user:premium")],
-            [Btn("🎁 Redeem", callback_data="user:redeem"),
+            [Btn("🎁 Redeem & Refer", callback_data="user:redeem"),
              Btn("👑 Owner/Admin Panel", callback_data="panel:home") if show_owner else Btn("💬 Contact", url="https://t.me/f4talkbot")],
         ])
     return Kb(rows)
@@ -341,6 +352,16 @@ def dm_start_kb(bot_username=None):
     if not bot_username:
         return None
     return Kb([[Btn("💬 Start in Private Chat", url=f"https://t.me/{bot_username}?start=music")]])
+
+
+def balance_dm_kb(bot_username=None):
+    if not bot_username:
+        return None
+    return Kb([[Btn("💳 Check my private balance", url=f"https://t.me/{bot_username}?start=balance")]])
+
+
+def credit_help_kb():
+    return Kb([[Btn("🎁 Redeem & Refer", callback_data="user:redeem"), Btn("💎 Buy credits", url="https://t.me/f4talkbot")]])
 
 
 def back_kb():
@@ -447,6 +468,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
     picks = PickStore()
     cooldowns = {}
     setup_ok = {}         # chat_id -> monotonic time until which the setup check is cached
+    waiting_assistant_groups = set()
     download_gate = asyncio.Semaphore(cfg.download_slots)
     bot_info = {}
 
@@ -458,13 +480,20 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
     if login_bridge:
         @app.on_message(filters.private & filters.text)
         async def assistant_login_reply(client, message):
-            if not login_bridge.active:
+            if not login_bridge.active_login:
                 raise ContinuePropagation
             if not message.from_user or message.from_user.id not in login_bridge.owner_ids:
                 return
             accepted = await login_bridge.submit(message.text.strip())
             if accepted:
                 await message.reply("✅ Received securely. Continuing assistant login…")
+
+    @app.on_message(filters.private & filters.command(MANAGER_COMMANDS))
+    async def silent_unauthorized_manager_command(client, message):
+        # Do not leak whether a management command exists to ordinary users.
+        if not manager_only(message):
+            return
+        raise ContinuePropagation
 
     async def studio_audio_message(client, query_or_title):
         """Find an MP3 in Song Studio without downloading it again."""
@@ -618,6 +647,44 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
     def manager_only(message) -> bool:
         return bool(message.from_user and is_manager(message.from_user.id))
 
+    def assistant_pool_file() -> Path:
+        return cfg.state_db.with_name("assistant_pool.json")
+
+    def assistant_records() -> list:
+        path = assistant_pool_file()
+        if not path.is_file():
+            if cfg.assistant_user_id:
+                return [{
+                    "phone": cfg.assistant_phone or "",
+                    "user_id": cfg.assistant_user_id,
+                    "session": cfg.assistant_session,
+                    "assignments": "all",
+                }]
+            return []
+        try:
+            return json.loads(path.read_text(encoding="utf-8")).get("assistants", [])
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return []
+
+    def save_assistant_records(records: list):
+        assistant_pool_file().write_text(json.dumps({"assistants": records}, indent=2), encoding="utf-8")
+
+    def assistant_allowed(chat_id: int) -> bool:
+        return bool(player.for_chat(chat_id) if hasattr(player, "for_chat") else player)
+
+    async def notify_waiting_assistant_groups(client):
+        for chat_id in list(waiting_assistant_groups):
+            if not assistant_allowed(chat_id):
+                continue
+            try:
+                await client.send_message(
+                    chat_id,
+                    "✅ <b>Music Assistant is now available.</b>\nYou can use /play again.",
+                )
+                waiting_assistant_groups.discard(chat_id)
+            except Exception:
+                logger.debug("Could not notify waiting group %s", chat_id, exc_info=True)
+
     def credit_cost(kind: str) -> int:
         default = 2 if kind == "video" else 1
         return store.get_int_setting(f"credit_cost_{kind}", default, 0, 100)
@@ -670,7 +737,9 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         if balance < cost:
             await message.reply(
                 f"💳 You need <b>{cost}</b> credits, but have <b>{balance}</b>.\n"
-                f"You receive {daily_credit_amount()} credits daily. Use /redeem CODE for more."
+                f"You receive {daily_credit_amount()} credits daily.\n"
+                "Buy credits or use Refer & Earn to get more.",
+                reply_markup=credit_help_kb(),
             )
             return False
         return True
@@ -918,6 +987,13 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
 
     async def check_setup(client, chat):
         """Return an HTML error message, or None when playback can start."""
+        if not assistant_allowed(chat.id):
+            waiting_assistant_groups.add(chat.id)
+            return (
+                "🤖 <b>This group is not assigned to the assistant.</b>\n"
+                "No Music Assistant is available right now. Try again later; "
+                "you will be notified once one is available."
+            )
         if player.priority_blocked(chat.id):
             return (
                 "⏳ <b>Assistant is serving the priority group right now.</b>\n"
@@ -949,15 +1025,18 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         if player.priority_chat_id == chat.id:
             await player.release_other_chats(chat.id)
         await player.start()
-        assistant = await player.assistant_me()
+        voice = player.for_chat(chat.id) if hasattr(player, "for_chat") else player
+        if voice is None:
+            return "🤖 <b>No Music Assistant is available right now.</b>\nTry again later; you will be notified when one is available."
+        assistant = await voice.assistant_me()
         try:
-            member = await player.assistant.get_chat_member(chat.id, assistant.id)
+            member = await voice.assistant.get_chat_member(chat.id, assistant.id)
         except Exception:
             member = None
         if not member or member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
             try:
                 target = chat.username or await client.export_chat_invite_link(chat.id)
-                await player.assistant.join_chat(target)
+                await voice.assistant.join_chat(target)
             except Exception as exc:
                 logger.warning("Assistant could not join chat %s: %s", chat.id, exc)
                 handle = f"@{assistant.username}" if assistant.username else esc(assistant.first_name)
@@ -965,7 +1044,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
                     "⚙️ <b>Setup needed</b>\nThe assistant account couldn't join automatically.\n"
                     f"Add <b>{handle}</b> to this group (and unban it if needed), then try again."
                 )
-            member = await player.assistant.get_chat_member(chat.id, assistant.id)
+            member = await voice.assistant.get_chat_member(chat.id, assistant.id)
 
         # The bot can promote the assistant after it joins when it has
         # can_promote_members. This lets PyTgCalls create a call if none is
@@ -1239,7 +1318,11 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         if not is_group and not store.is_premium(uid):
             charged = store.get_int_setting("credit_cost_search", 0, 0, 100)
             if not store.consume_credits(uid, charged):
-                return await edit_card(status, "💳 Not enough credits for these results. Use /balance or /redeem CODE.")
+                return await edit_card(
+                    status,
+                    "💳 <b>Not enough credits</b>\nBuy credits or use Refer & Earn to get more.",
+                    credit_help_kb(),
+                )
         store.log_usage(uid, message.chat.id, "search", query, True, charged)
         token = picks.put(results)
         lines = [f"<b>Results</b> · <i>{esc(query[:60])}</i>", ""]
@@ -1269,23 +1352,52 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
             if len(message.command) > 1 and message.command[1].startswith("ref_"):
                 raw_referrer = message.command[1][4:]
                 if raw_referrer.isdigit():
-                    referrer = store.claim_referral(message.from_user.id, int(raw_referrer))
-                    if referrer:
-                        referral_notice = "\n\n🎁 <b>Referral linked!</b> Your friend earned 5 credits."
+                    referral = store.claim_referral(message.from_user.id, int(raw_referrer))
+                    if referral:
+                        referral_notice = (
+                            "\n\n🎁 <b>Referral successful!</b>\n"
+                            "You received <b>10 credits</b>. Your friend received <b>20 credits</b>."
+                        )
                         try:
                             await client.send_message(
-                                referrer,
-                                f"🎁 <b>New referral!</b> <code>{message.from_user.id}</code> joined. You earned <b>5 credits</b>.\n"
-                                f"Updated balance: <b>{store.user_balance(referrer)}</b>.",
+                                referral["referrer"],
+                                f"🎁 <b>New referral!</b>\n<code>{message.from_user.id}</code> joined through your link.\n"
+                                "You earned <b>20 credits</b>.\n"
+                                f"Updated balance: <b>{store.user_balance(referral['referrer'])}</b>.",
                             )
                         except Exception:
-                            logger.debug("Could not notify referrer %s", referrer, exc_info=True)
+                            logger.debug("Could not notify referrer %s", referral["referrer"], exc_info=True)
+                        if referral["upstream"]:
+                            try:
+                                await client.send_message(
+                                    referral["upstream"],
+                                    f"🎁 <b>Referral network bonus!</b>\n<code>{referral['referrer']}</code> invited a new member.\n"
+                                    "You received <b>5 credits</b> as their referrer.\n"
+                                    f"Updated balance: <b>{store.user_balance(referral['upstream'])}</b>.",
+                                )
+                            except Exception:
+                                logger.debug("Could not notify upstream referrer %s", referral["upstream"], exc_info=True)
             force_error = await user_access(client, message.chat, message.from_user.id)
             if force_error:
                 return await message.reply(
                     force_error,
                     reply_markup=force_join_kb(store.force_channels()),
                     disable_web_page_preview=True,
+                )
+            if len(message.command) > 1 and message.command[1].lower() == "balance":
+                if store.is_premium(message.from_user.id) or is_owner(message.from_user.id) or is_manager(message.from_user.id):
+                    balance_text = "♾️ unlimited"
+                else:
+                    balance_text = f"{store.user_balance(message.from_user.id)} credits"
+                return await message.reply(
+                    "💳 <b>Your private balance</b>\n\n"
+                    f"💰 Available: <b>{balance_text}</b>\n"
+                    f"🎁 Daily refill: <b>{daily_credit_amount()} credits</b>\n"
+                    f"🎵 Audio: <b>{credit_cost('audio')}</b> credit(s) · "
+                    f"🎬 Video: <b>{credit_cost('video')}</b> credit(s)",
+                    reply_markup=home_kb(
+                        await bot_username(), show_owner=is_manager(message.from_user.id)
+                    ),
                 )
             display_name = message.from_user.first_name or message.from_user.username or "there"
             plan, power = account_status(message.from_user.id)
@@ -1384,6 +1496,8 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
 
     @app.on_message(filters.command(["stats"]))
     async def stats(client, message):
+        if not manager_only(message):
+            return
         await message.reply(
             "📊 <b>F4 Music</b>\n\n"
             f"⏱ Uptime: <code>{fmt_uptime(time.time() - started_at)}</code>\n"
@@ -1566,7 +1680,10 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
                 "/creditcosts · /setdaily AMOUNT\n/forcejoin @channel · /unforcejoin CHAT_ID\n\n"
                 "<b>Operations</b>\n/panel · /broadcast · /broadcastgc CHAT_ID TEXT\n"
                 "/setcookies · /delcookies · /setproxy · /delproxy · /setqr\n"
-                "/assistant · /setassistant PHONE USER_ID · /clearassistant"
+                "/assistant · /setassistant PHONE USER_ID · /clearassistant\n"
+                "/addassistant PHONE USER_ID all|CHAT_ID · /removeassistant USER_ID\n"
+                "/assignassistant USER_ID all|CHAT_ID · /unassignassistant USER_ID CHAT_ID\n"
+                "/assistantall USER_ID · /assistantlist"
             )
         if callback.message:
             await edit_card(callback.message, text + "\n\n" + CREDIT_LINE, panel_kb())
@@ -1590,13 +1707,23 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
                 f"💎 Plan: <b>{'Premium' if premium else 'Free'}</b>"
             )
         elif action == "redeem":
-            text = "🎁 <b>Redeem credits</b>\nUse <code>/redeem ALIEN12345678</code>.\nCodes are issued by the owner/admin."
+            username = await bot_username()
+            text = (
+                "🎁 <b>Redeem & Refer</b>\n\n"
+                "Redeem a code with:\n<code>/redeem ALIEN12345678</code>\n"
+                "Codes are issued by the owner/admin.\n\n"
+                "🔗 <b>Refer & Earn</b>\n"
+                "Your friend gets <b>10 credits</b> and you get <b>20 credits</b>.\n"
+                "If your friend refers someone, you receive a <b>5-credit network bonus</b>.\n\n"
+                f"Your invite link:\n<code>https://t.me/{username}?start=ref_{uid}</code>\n"
+                f"Successful referrals: <b>{store.referral_count(uid)}</b>"
+            )
         elif action == "refer":
             username = await bot_username()
             text = (
                 "🔗 <b>Refer & Earn</b>\n"
                 f"Invite friends with:\n<code>https://t.me/{username}?start=ref_{uid}</code>\n\n"
-                f"You have earned <b>{store.referral_count(uid)}</b> referrals. Each valid referral gives <b>5 credits</b>."
+                f"You have earned <b>{store.referral_count(uid)}</b> referrals. Each valid referral gives you <b>20 credits</b>."
             )
         elif action == "premium":
             if store.is_premium(uid):
@@ -1846,15 +1973,137 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
     async def assistant_status_command(client, message):
         if not is_owner(message.from_user.id if message.from_user else 0):
             return await message.reply("⛔ Owner only.")
-        phone = cfg.assistant_phone or "not set"
-        masked = phone[:3] + "***" + phone[-3:] if len(phone) >= 6 else phone
+        records = assistant_records()
+        lines = ["🤖 <b>Assistant pool</b>", ""]
+        for record in records:
+            phone = str(record.get("phone") or "not set")
+            masked = phone[:3] + "***" + phone[-3:] if len(phone) >= 6 else phone
+            assignments = record.get("assignments", "all")
+            scope = "all groups" if assignments == "all" else ", ".join(str(item) for item in assignments) or "none"
+            lines.append(f"• <code>{record.get('user_id')}</code> · <code>{esc(masked)}</code> · {esc(scope)}")
+        lines += [
+            "", "Only the owner can view or change this list.",
+            "<code>/addassistant PHONE USER_ID all|CHAT_ID</code>",
+            "<code>/assignassistant USER_ID all|CHAT_ID</code>",
+            "<code>/unassignassistant USER_ID CHAT_ID</code>",
+            "<code>/removeassistant USER_ID</code>",
+            "<code>/assistantlist</code> · view assignments",
+        ]
         await message.reply(
-            "🤖 <b>Assistant configuration</b>\n"
-            f"Phone: <code>{esc(masked)}</code>\n"
-            f"User ID: <code>{cfg.assistant_user_id or 'not set'}</code>\n"
-            f"Session: <code>{esc(cfg.assistant_session)}</code>\n"
-            "Only the owner can view or change these values."
+            "\n".join(lines)
         )
+
+    @app.on_message(filters.private & filters.command(["addassistant"]))
+    async def add_assistant_command(client, message):
+        if not is_owner(message.from_user.id if message.from_user else 0):
+            return await message.reply("⛔ Owner only.")
+        if len(message.command) not in (3, 4) or not message.command[2].isdigit():
+            return await message.reply("Usage: <code>/addassistant PHONE USER_ID all|CHAT_ID</code>")
+        phone, user_id = message.command[1].strip(), int(message.command[2])
+        if not re.fullmatch(r"\+?[0-9][0-9 -]{5,20}", phone) or user_id <= 0:
+            return await message.reply("Invalid assistant phone or user ID.")
+        scope = message.command[3].lower() if len(message.command) == 4 else "all"
+        if scope != "all":
+            try:
+                scope = [int(scope)]
+                if scope[0] >= 0:
+                    raise ValueError
+            except ValueError:
+                return await message.reply("Use <code>all</code> or a valid negative group chat ID.")
+        records = [record for record in assistant_records() if int(record.get("user_id", 0)) != user_id]
+        records.append({"phone": phone, "user_id": user_id, "session": f"voice_assistant_{user_id}", "assignments": scope})
+        save_assistant_records(records)
+        await notify_waiting_assistant_groups(client)
+        await message.reply(f"✅ Assistant <code>{user_id}</code> saved. Restart the bot to connect this account.")
+
+    @app.on_message(filters.private & filters.command(["assignassistant"]))
+    async def assign_assistant_command(client, message):
+        if not is_owner(message.from_user.id if message.from_user else 0):
+            return await message.reply("⛔ Owner only.")
+        if len(message.command) not in (2, 3):
+            return await message.reply("Usage: <code>/assignassistant USER_ID all|CHAT_ID</code>")
+        records = assistant_records()
+        try:
+            if len(message.command) == 2:
+                user_id = int(cfg.assistant_user_id or 0)
+                scope = message.command[1].lower()
+            else:
+                user_id = int(message.command[1])
+                scope = message.command[2].lower()
+            if user_id <= 0:
+                raise ValueError
+            if scope == "all":
+                assignments = "all"
+            else:
+                chat_id = int(scope)
+                if chat_id >= 0:
+                    raise ValueError
+                assignments = [chat_id]
+            for record in records:
+                if int(record.get("user_id", 0)) == user_id:
+                    record["assignments"] = assignments
+                    save_assistant_records(records)
+                    await notify_waiting_assistant_groups(client)
+                    return await message.reply(f"✅ Assistant <code>{user_id}</code> assigned to <b>{scope}</b>.")
+            return await message.reply("That assistant is not registered. Use /addassistant first.")
+        except ValueError:
+            await message.reply("Usage: <code>/assignassistant USER_ID all|CHAT_ID</code>")
+
+    @app.on_message(filters.private & filters.command(["removeassistant"]))
+    async def remove_assistant_command(client, message):
+        if not is_owner(message.from_user.id if message.from_user else 0):
+            return await message.reply("⛔ Owner only.")
+        if len(message.command) != 2 or not message.command[1].isdigit():
+            return await message.reply("Usage: <code>/removeassistant USER_ID</code>")
+        user_id = int(message.command[1])
+        records = [record for record in assistant_records() if int(record.get("user_id", 0)) != user_id]
+        if len(records) == len(assistant_records()):
+            return await message.reply("That assistant is not registered.")
+        save_assistant_records(records)
+        await message.reply(f"✅ Assistant <code>{user_id}</code> removed. Restart the bot to disconnect it.")
+
+    @app.on_message(filters.private & filters.command(["unassignassistant"]))
+    async def unassign_assistant_command(client, message):
+        if not is_owner(message.from_user.id if message.from_user else 0):
+            return await message.reply("⛔ Owner only.")
+        if len(message.command) != 3 or not message.command[1].isdigit() or not message.command[2].lstrip("-").isdigit():
+            return await message.reply("Usage: <code>/unassignassistant USER_ID CHAT_ID</code>")
+        user_id, chat_id = int(message.command[1]), int(message.command[2])
+        records = assistant_records()
+        for record in records:
+            if int(record.get("user_id", 0)) == user_id and record.get("assignments") != "all":
+                record["assignments"] = [item for item in record.get("assignments", []) if int(item) != chat_id]
+                save_assistant_records(records)
+                await notify_waiting_assistant_groups(client)
+                return await message.reply(f"✅ Assistant <code>{user_id}</code> removed from <code>{chat_id}</code>.")
+        await message.reply("No selected-group assignment was found.")
+
+    @app.on_message(filters.private & filters.command(["assistantall"]))
+    async def assistant_all_command(client, message):
+        if not is_owner(message.from_user.id if message.from_user else 0):
+            return await message.reply("⛔ Owner only.")
+        if len(message.command) > 1 and message.command[1].isdigit():
+            user_id = int(message.command[1])
+            records = assistant_records()
+            for record in records:
+                if int(record.get("user_id", 0)) == user_id:
+                    record["assignments"] = "all"
+                    save_assistant_records(records)
+                    await notify_waiting_assistant_groups(client)
+                    return await message.reply(f"✅ Assistant <code>{user_id}</code> is available to <b>all groups</b>.")
+        await message.reply("Usage: <code>/assistantall USER_ID</code>")
+
+    @app.on_message(filters.private & filters.command(["assistantlist"]))
+    async def assistant_list_command(client, message):
+        if not is_owner(message.from_user.id if message.from_user else 0):
+            return await message.reply("⛔ Owner only.")
+        lines = ["🤖 <b>Assistant assignments</b>"]
+        for record in assistant_records():
+            scope = record.get("assignments", "all")
+            groups = "all groups" if scope == "all" else ", ".join(str(item) for item in scope) or "none"
+            lines.append(f"• <code>{record.get('user_id')}</code> → <b>{esc(groups)}</b>")
+        text = "\n".join(lines)
+        await message.reply(text)
 
     @app.on_message(filters.private & filters.command(["setassistant"]))
     async def set_assistant_command(client, message):
@@ -1867,6 +2116,14 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
             return await message.reply("Invalid assistant phone or user ID.")
         assistant_file = cfg.state_db.with_name("assistant_config.json")
         try:
+            records = [record for record in assistant_records() if int(record.get("user_id", 0)) != user_id]
+            records.insert(0, {
+                "phone": phone,
+                "user_id": user_id,
+                "session": f"voice_assistant_{user_id}",
+                "assignments": "all",
+            })
+            save_assistant_records(records)
             assistant_file.write_text(
                 json.dumps({
                     "phone": phone,
@@ -1893,6 +2150,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         if not is_owner(message.from_user.id if message.from_user else 0):
             return await message.reply("⛔ Owner only.")
         try:
+            save_assistant_records([])
             cfg.state_db.with_name("assistant_config.json").write_text(
                 json.dumps({"phone": "", "user_id": "", "session": "voice_assistant_unconfigured"}),
                 encoding="utf-8",
@@ -1948,13 +2206,22 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
     async def balance_command(client, message):
         uid = message.from_user.id
         store.register_user(uid)
+        if message.chat.type in GROUP_TYPES:
+            await message.reply(
+                f"👥 <b>{esc(message.chat.title or 'This group')}</b>\n\n"
+                "💰 Group access: <b>♾️ unlimited</b>\n"
+                "🎧 Voice playback and group searches are unlimited.\n\n"
+                "To check your personal credits, open the bot privately:",
+                reply_markup=balance_dm_kb(await bot_username()),
+            )
+            return
         balance = store.user_balance(uid)
         if store.is_premium(uid):
-            balance_text = "♾️ unlimited · Premium"
+            balance_text = "♾️ unlimited · 💎 Premium"
         elif is_owner(uid):
-            balance_text = f"{balance} credits · 👑 owner access"
+            balance_text = "♾️ unlimited · 👑 Owner"
         elif is_manager(uid):
-            balance_text = f"{balance} credits · 🛡 admin access"
+            balance_text = "♾️ unlimited · 🛡 Admin"
         else:
             balance_text = f"{balance} credits · 🆓 free plan"
         location = "👥 Group balance" if message.chat.type in GROUP_TYPES else "💳 Your balance"
@@ -2171,6 +2438,8 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
     async def dm_only_group_hint(client, message):
         """Keep private/account/management commands from running in groups."""
         command = (message.command[0] if message.command else "command").split("@", 1)[0]
+        if command in MANAGER_COMMANDS and not manager_only(message):
+            return
         await message.reply(
             f"💬 <b>/{esc(command)}</b> is available in private chat only.\n"
             "Tap the bot's name and send it there. Group playback uses /play."

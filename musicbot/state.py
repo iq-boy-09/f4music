@@ -507,7 +507,7 @@ class QueueStore:
         self.add_credits(user_id, int(row[0]))
         return int(row[0])
 
-    def claim_referral(self, referred_id: int, referrer_id: int, reward: int = 5):
+    def claim_referral(self, referred_id: int, referrer_id: int):
         if not referrer_id or referred_id == referrer_id:
             return None
         self.register_user(referred_id)
@@ -516,13 +516,29 @@ class QueueStore:
             row = self._db.execute("SELECT referrer_id FROM referrals WHERE referred_id=?", (referred_id,)).fetchone()
             if row:
                 return None
+            upstream = self._db.execute(
+                "SELECT referrer_id FROM referrals WHERE referred_id=?", (referrer_id,)
+            ).fetchone()
             self._db.execute(
                 "INSERT INTO referrals(referred_id,referrer_id,rewarded_at) VALUES(?,?,?)",
                 (referred_id, referrer_id, time.time()),
             )
             self._db.commit()
-        self.add_credits(referrer_id, reward)
-        return referrer_id
+        # Direct inviter gets 20, the new member gets 10, and the inviter's
+        # own referrer gets a small 5-credit second-level bonus.
+        self.add_credits(referrer_id, 20)
+        self.add_credits(referred_id, 10)
+        upstream_id = int(upstream[0]) if upstream and int(upstream[0]) != referred_id else None
+        if upstream_id:
+            self.add_credits(upstream_id, 5)
+        return {
+            "referrer": int(referrer_id),
+            "referred": int(referred_id),
+            "upstream": upstream_id,
+            "referrer_reward": 20,
+            "referred_reward": 10,
+            "upstream_reward": 5 if upstream_id else 0,
+        }
 
     def referral_count(self, user_id: int) -> int:
         with self._lock:

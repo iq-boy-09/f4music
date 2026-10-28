@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import sqlite3
@@ -21,7 +22,7 @@ from .config import Config, ConfigError
 from .handlers import HOME_TEXT, register
 from .media import YouTubeMedia
 from .state import IST, QueueStore
-from .voice import VoicePlayer
+from .voice import AssistantPool, VoicePlayer
 
 
 def _patch_pyrogram_disconnect_race():
@@ -289,36 +290,57 @@ def main():
             parse_mode=ParseMode.HTML,
             proxy=config.telegram_proxy,
         )
-        assistant = Client(
-            config.assistant_session,
-            api_id=config.api_id,
-            api_hash=config.api_hash,
-            phone_number=config.assistant_phone,
-            proxy=config.telegram_proxy,
-        )
-        login_bridge = AssistantLoginBridge(
-            bot,
-            config.superowner_ids or config.owner_ids,
-            config.assistant_phone,
-            config.assistant_user_id,
-        )
         store = QueueStore(config.state_db)
         store.clear_all()
         YouTubeMedia.cleanup_stale_downloads()
         media = YouTubeMedia(config.download_dir, config.cookies_file, config.cookies_from_browser)
-        player = VoicePlayer(
-            assistant,
-            store,
-            media,
-            config.max_queue,
-            config.default_volume,
-            config.assistant_user_id,
-            login_bridge.notify_success,
+        pool_file = config.state_db.with_name("assistant_pool.json")
+        records = []
+        if pool_file.is_file():
+            try:
+                records = json.loads(pool_file.read_text(encoding="utf-8")).get("assistants", [])
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                records = []
+        if not records and config.assistant_user_id:
+            records = [{
+                "phone": config.assistant_phone or "",
+                "user_id": config.assistant_user_id,
+                "session": config.assistant_session,
+                "assignments": "all",
+            }]
+        assistants, bridges, players = {}, {}, {}
+        for record in records:
+            try:
+                user_id = int(record["user_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            assistant = Client(
+                str(record.get("session") or f"voice_assistant_{user_id}"),
+                api_id=config.api_id,
+                api_hash=config.api_hash,
+                phone_number=record.get("phone") or None,
+                proxy=config.telegram_proxy,
+            )
+            bridge = AssistantLoginBridge(
+                bot,
+                config.superowner_ids or config.owner_ids,
+                record.get("phone") or "the configured assistant number",
+                user_id,
+            )
+            assistants[user_id] = assistant
+            bridges[user_id] = bridge
+            players[user_id] = VoicePlayer(
+                assistant, store, media, config.max_queue, config.default_volume,
+                user_id, bridge.notify_success, priority_chat_id=None,
+            )
+        player = AssistantPool(
+            players, bridges, pool_file,
             priority_chat_id=-1004220556565,
+            owner_ids=config.superowner_ids or config.owner_ids,
         )
-        register(bot, player, media, store, config, login_bridge=login_bridge)
+        register(bot, player, media, store, config, login_bridge=player)
         original_ainput = pyrogram_client.ainput
-        pyrogram_client.ainput = login_bridge.input
+        pyrogram_client.ainput = player.input
         daily_credit_task = None
         health_server = None
 
@@ -389,14 +411,18 @@ def main():
                 except asyncio.CancelledError:
                     pass
             await player.shutdown()
-            if assistant.is_connected:
-                await assistant.stop()
+            for assistant in assistants.values():
+                if assistant.is_connected:
+                    await assistant.stop()
             if bot.is_connected:
                 await bot.stop()
             store.close()
             YouTubeMedia.cleanup_stale_downloads()
             if config.cleanup_sessions_on_exit:
-                cleanup_session_files(config.bot_session, config.assistant_session)
+                cleanup_session_files(config.bot_session, *[
+                    str(record.get("session") or f"voice_assistant_{record.get('user_id')}")
+                    for record in records if record.get("user_id")
+                ])
 
     try:
         asyncio.run(run())

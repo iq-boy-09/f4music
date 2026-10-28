@@ -406,3 +406,215 @@ class VoicePlayer:
                 return
         if item is not None:
             self._notify(self.on_track, chat_id, item)
+
+
+class _PoolMap:
+    def __init__(self, pool, attribute):
+        self.pool = pool
+        self.attribute = attribute
+
+    def _map(self, key):
+        player = self.pool.for_chat(key)
+        return getattr(player, self.attribute) if player else {}
+
+    def get(self, key, default=None):
+        return self._map(key).get(key, default)
+
+    def __contains__(self, key):
+        return key in self._map(key)
+
+    def __getitem__(self, key):
+        return self._map(key)[key]
+
+    def __setitem__(self, key, value):
+        self._map(key)[key] = value
+
+    def pop(self, key, default=None):
+        return self._map(key).pop(key, default)
+
+
+class _PoolSet:
+    def __init__(self, pool, attribute):
+        self.pool = pool
+        self.attribute = attribute
+
+    def __contains__(self, key):
+        return any(key in getattr(player, self.attribute) for player in self.pool.players.values())
+
+    def __len__(self):
+        return sum(len(getattr(player, self.attribute)) for player in self.pool.players.values())
+
+    def __iter__(self):
+        values = set()
+        for player in self.pool.players.values():
+            values.update(getattr(player, self.attribute))
+        return iter(values)
+
+
+class AssistantPool:
+    """Route each group to an owner-assigned assistant VoicePlayer."""
+
+    def __init__(self, players, bridges, assignment_path, priority_chat_id=PRIMARY_VOICE_CHAT_ID, owner_ids=()):
+        self.players = {int(user_id): player for user_id, player in players.items()}
+        self.bridges = {int(user_id): bridge for user_id, bridge in bridges.items()}
+        self.assignment_path = assignment_path
+        self.priority_chat_id = priority_chat_id
+        self.owner_ids = tuple(owner_ids)
+        self.current = _PoolMap(self, "current")
+        self.paused = _PoolSet(self, "paused")
+        self.loop = _PoolMap(self, "loop")
+        self.volume = _PoolMap(self, "volume")
+        self.active = _PoolSet(self, "active")
+        self._active_bridge = None
+        self._request_context = (None, "")
+        self.on_track = None
+        self.on_end = None
+        self.on_error = None
+        for player in self.players.values():
+            player.priority_chat_id = None
+            player.on_track = self._forward_track
+            player.on_end = self._forward_end
+            player.on_error = self._forward_error
+
+    def _assignment_data(self):
+        try:
+            import json
+            from pathlib import Path
+            data = json.loads(Path(self.assignment_path).read_text(encoding="utf-8"))
+            return data.get("assistants", [])
+        except Exception:
+            return []
+
+    def _allowed(self, user_id, chat_id):
+        for entry in self._assignment_data():
+            if int(entry.get("user_id", 0)) != int(user_id):
+                continue
+            assignments = entry.get("assignments", "all")
+            if assignments == "all" or int(chat_id) in {int(value) for value in assignments}:
+                return True
+        return False
+
+    def for_chat(self, chat_id):
+        exact, universal = [], []
+        entries = self._assignment_data()
+        if not entries:
+            universal = list(self.players)
+        for user_id in self.players:
+            if any(int(item.get("user_id", 0)) == user_id and int(chat_id) in {int(v) for v in item.get("assignments", [])} for item in entries if item.get("assignments") != "all"):
+                exact.append(user_id)
+            if any(int(item.get("user_id", 0)) == user_id and item.get("assignments") == "all" for item in entries):
+                universal.append(user_id)
+        candidates = exact or universal
+        if not candidates:
+            return None
+        # Prefer an idle assistant; keep the current owner of this group stable.
+        candidates.sort(key=lambda user_id: (0 if chat_id in self.players[user_id].active else len(self.players[user_id].active), user_id))
+        for user_id in candidates:
+            candidate = self.players[user_id]
+            if chat_id in candidate.active or not candidate.active:
+                return candidate
+        # The priority group may reclaim its assigned assistant; the caller
+        # releases other calls before starting it.
+        if chat_id == self.priority_chat_id:
+            return self.players[candidates[0]]
+        return None
+
+    def _bridge_for(self, player):
+        for user_id, candidate in self.players.items():
+            if candidate is player:
+                return self.bridges.get(user_id)
+        return None
+
+    async def _forward_track(self, *args):
+        if self.on_track:
+            await self.on_track(*args)
+
+    async def _forward_end(self, *args):
+        if self.on_end:
+            await self.on_end(*args)
+
+    async def _forward_error(self, *args):
+        if self.on_error:
+            await self.on_error(*args)
+
+    async def start(self):
+        requested_chat = self._request_context[0]
+        player = self.for_chat(requested_chat if requested_chat is not None else (self.priority_chat_id or 0))
+        if player:
+            bridge = self._bridge_for(player)
+            self._active_bridge = bridge
+            if bridge:
+                bridge.set_request_context(*self._request_context)
+            await player.start()
+
+    async def assistant_me(self, chat_id):
+        player = self.for_chat(chat_id)
+        if not player:
+            return None
+        return await player.assistant_me()
+
+    async def enqueue_and_play(self, chat_id, item):
+        player = self.for_chat(chat_id)
+        if not player:
+            raise NoActiveCall("No Music Assistant is available. Try again later.")
+        self._active_bridge = self._bridge_for(player)
+        return await player.enqueue_and_play(chat_id, item)
+
+    def priority_blocked(self, chat_id):
+        return bool(self.priority_chat_id and chat_id != self.priority_chat_id and self.priority_chat_id in self.active)
+
+    async def release_other_chats(self, keep_chat_id):
+        for player in self.players.values():
+            for chat_id in list(player.active):
+                if chat_id != keep_chat_id:
+                    await player.stop(chat_id)
+
+    def _route(self, chat_id):
+        player = self.for_chat(chat_id)
+        if not player:
+            raise NoActiveCall("No Music Assistant is available. Try again later.")
+        self._active_bridge = self._bridge_for(player)
+        return player
+
+    async def skip(self, chat_id): return await self._route(chat_id).skip(chat_id)
+    async def toggle_pause(self, chat_id): return await self._route(chat_id).toggle_pause(chat_id)
+    async def set_volume(self, chat_id, volume): return await self._route(chat_id).set_volume(chat_id, volume)
+    def set_loop(self, chat_id, mode): return self._route(chat_id).set_loop(chat_id, mode)
+    def cycle_loop(self, chat_id): return self._route(chat_id).cycle_loop(chat_id)
+    async def stop(self, chat_id): return await self._route(chat_id).stop(chat_id)
+    async def is_participant(self, chat_id, user_id): return await self._route(chat_id).is_participant(chat_id, user_id)
+
+    async def shutdown(self):
+        for player in self.players.values():
+            await player.shutdown()
+
+    @property
+    def assistant(self):
+        player = self.for_chat(self.priority_chat_id or 0)
+        return player.assistant if player else None
+
+    @property
+    def started(self):
+        return any(player.started for player in self.players.values())
+
+    # LoginBridge-compatible methods used by handlers.
+    @property
+    def active_login(self):
+        return bool(self._active_bridge and self._active_bridge.active)
+
+    def set_request_context(self, chat_id, title=""):
+        self._request_context = (chat_id, title or "")
+        if self._active_bridge:
+            self._active_bridge.set_request_context(chat_id, title)
+
+    async def submit(self, value):
+        return bool(self._active_bridge and await self._active_bridge.submit(value))
+
+    async def input(self, prompt="", hide=False):
+        if not self._active_bridge:
+            raise EOFError("No assistant login is active")
+        return await self._active_bridge.input(prompt, hide)
+
+    async def notify_success(self):
+        if self._active_bridge:
+            await self._active_bridge.notify_success()
