@@ -131,14 +131,21 @@ def cleanup_session_files(*session_names):
 class AssistantLoginBridge:
     """Relay Pyrogram's first-login prompts to the configured owner in DM."""
 
-    def __init__(self, bot, owner_ids, phone):
+    def __init__(self, bot, owner_ids, phone, user_id=None):
         self.bot = bot
         self.owner_ids = tuple(owner_ids)
         self.phone = phone or "the configured assistant number"
+        self.user_id = user_id
         self.active = False
         self.phase = ""
         self._had_prompt = False
+        self.request_chat_id = None
+        self.request_chat_title = ""
         self._answers = asyncio.Queue()
+
+    def set_request_context(self, chat_id, title=""):
+        self.request_chat_id = chat_id
+        self.request_chat_title = title or ""
 
     async def _notify(self, text):
         for owner_id in self.owner_ids:
@@ -149,11 +156,16 @@ class AssistantLoginBridge:
 
     async def input(self, prompt="", hide=False):
         prompt_text = str(prompt).lower()
+        masked_phone = self.phone[:3] + "***" + self.phone[-3:] if len(self.phone) >= 6 else self.phone
+        assistant_identity = (
+            f"\n<b>Assistant phone:</b> <code>{masked_phone}</code>"
+            f"\n<b>Assistant ID:</b> <code>{self.user_id or 'not set'}</code>"
+        )
         if "confirmation code" in prompt_text:
             self.phase = "code"
             instruction = (
                 "🔐 <b>Assistant verification required</b>\n"
-                "Telegram sent a login code to the configured assistant account.\n"
+                "Telegram sent a login code to this assistant account.\n"
                 "Reply to this message with the code only."
             )
         elif "password" in prompt_text:
@@ -162,6 +174,12 @@ class AssistantLoginBridge:
         else:
             self.phase = "phone"
             instruction = "📱 <b>Assistant phone required</b>\nReply with the phone number in international format."
+        instruction += assistant_identity
+        if self.request_chat_id is not None:
+            instruction += (
+                f"\n\n<b>Requested by group:</b> {self.request_chat_title or 'Unknown'}\n"
+                f"<b>Group ID:</b> <code>{self.request_chat_id}</code>"
+            )
         self.active = True
         self._had_prompt = True
         await self._notify(instruction)
@@ -177,7 +195,12 @@ class AssistantLoginBridge:
 
     async def notify_success(self):
         if self._had_prompt:
-            await self._notify("✅ <b>Assistant login successful.</b> Voice playback is ready.")
+            context = (
+                f"\nVerified for group <code>{self.request_chat_id}</code>."
+                if self.request_chat_id is not None else ""
+            )
+            identity = f"\nAssistant ID: <code>{self.user_id or 'checked after login'}</code>"
+            await self._notify("✅ <b>Assistant login successful.</b> Voice playback is ready." + identity + context)
             self._had_prompt = False
 
 
@@ -221,6 +244,7 @@ BOT_COMMANDS = [
     BotCommand("send", "get an MP3"),
     BotCommand("video", "get a video"),
     BotCommand("play", "play in the voice chat"),
+    BotCommand("playlist", "manage the group smart playlist"),
     BotCommand("search", "search and pick a result"),
     BotCommand("ping", "check the bot"),
     BotCommand("help", "show all commands and uses"),
@@ -263,14 +287,21 @@ def main():
             api_hash=config.api_hash,
             bot_token=config.bot_token,
             parse_mode=ParseMode.HTML,
+            proxy=config.telegram_proxy,
         )
         assistant = Client(
             config.assistant_session,
             api_id=config.api_id,
             api_hash=config.api_hash,
             phone_number=config.assistant_phone,
+            proxy=config.telegram_proxy,
         )
-        login_bridge = AssistantLoginBridge(bot, config.owner_ids, config.assistant_phone)
+        login_bridge = AssistantLoginBridge(
+            bot,
+            config.superowner_ids or config.owner_ids,
+            config.assistant_phone,
+            config.assistant_user_id,
+        )
         store = QueueStore(config.state_db)
         store.clear_all()
         YouTubeMedia.cleanup_stale_downloads()
@@ -283,6 +314,7 @@ def main():
             config.default_volume,
             config.assistant_user_id,
             login_bridge.notify_success,
+            priority_chat_id=-1004220556565,
         )
         register(bot, player, media, store, config, login_bridge=login_bridge)
         original_ainput = pyrogram_client.ainput
@@ -331,6 +363,10 @@ def main():
                         raise
                     await asyncio.sleep(attempt * 2)
             log.info("Bot is live")
+            # The bot account itself is not a customer and must not appear in
+            # the user directory or receive credits.
+            bot_identity = await bot.get_me()
+            store.remove_user(bot_identity.id)
             await bot.set_bot_commands(BOT_COMMANDS)
             daily_credit_task = asyncio.create_task(daily_credit_notifier())
             health_server = await start_health_server(log)

@@ -119,6 +119,19 @@ class QueueStore:
                 message_id INTEGER NOT NULL,
                 created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS playlists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                source TEXT NOT NULL,
+                requested_by INTEGER NOT NULL DEFAULT 0,
+                requester TEXT NOT NULL DEFAULT '',
+                duration INTEGER NOT NULL DEFAULT 0,
+                uploader TEXT NOT NULL DEFAULT '',
+                thumb TEXT NOT NULL DEFAULT '',
+                added_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_playlists_chat ON playlists(chat_id, id);
             """
         )
         self._ensure_column("users", "credits", "INTEGER NOT NULL DEFAULT 10")
@@ -215,6 +228,58 @@ class QueueStore:
             self._db.execute("DELETE FROM queue")
             self._db.commit()
 
+    # ---- group playlists -----------------------------------------------
+    def playlist_add(self, chat_id: int, item: QueueItem) -> bool:
+        with self._lock:
+            exists = self._db.execute(
+                "SELECT 1 FROM playlists WHERE chat_id=? AND source=? LIMIT 1",
+                (chat_id, item.source),
+            ).fetchone()
+            if exists:
+                return False
+            self._db.execute(
+                "INSERT INTO playlists(chat_id,title,source,requested_by,requester,duration,uploader,thumb,added_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (chat_id, item.title, item.source, item.requested_by, item.requester,
+                 item.duration, item.uploader, item.thumb, time.time()),
+            )
+            self._db.commit()
+            return True
+
+    def playlist(self, chat_id: int, limit: int = 50):
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT title,source,requested_by,requester,duration,uploader,thumb,id "
+                "FROM playlists WHERE chat_id=? ORDER BY id LIMIT ?",
+                (chat_id, limit),
+            ).fetchall()
+        return [(QueueItem(*row[:7], id=row[7]), row[7]) for row in rows]
+
+    def playlist_remove(self, chat_id: int, position: int):
+        if position < 1:
+            return None
+        with self._lock:
+            row = self._db.execute(
+                "SELECT title,source,requested_by,requester,duration,uploader,thumb,id "
+                "FROM playlists WHERE chat_id=? ORDER BY id LIMIT 1 OFFSET ?",
+                (chat_id, position - 1),
+            ).fetchone()
+            if not row:
+                return None
+            self._db.execute("DELETE FROM playlists WHERE id=?", (row[7],))
+            self._db.commit()
+        return QueueItem(*row[:7], id=row[7])
+
+    def playlist_remove_id(self, item_id: int):
+        with self._lock:
+            self._db.execute("DELETE FROM playlists WHERE id=?", (item_id,))
+            self._db.commit()
+
+    def playlist_clear(self, chat_id: int):
+        with self._lock:
+            self._db.execute("DELETE FROM playlists WHERE chat_id=?", (chat_id,))
+            self._db.commit()
+
     # ---- users -----------------------------------------------------------
     def register_user(self, user_id: int, username: str = ""):
         with self._lock:
@@ -287,6 +352,12 @@ class QueueStore:
     def users(self) -> List[int]:
         with self._lock:
             return [row[0] for row in self._db.execute("SELECT user_id FROM users")]
+
+    def remove_user(self, user_id: int):
+        """Remove a Telegram bot account accidentally recorded as a user."""
+        with self._lock:
+            self._db.execute("DELETE FROM users WHERE user_id=?", (user_id,))
+            self._db.commit()
 
     def has_user(self, user_id: int) -> bool:
         with self._lock:

@@ -24,12 +24,12 @@ Please do not remove, hide, or replace the author credit when redistributing thi
 
 | Area | Included |
 | --- | --- |
-| Music | YouTube search, MP3, video, playlists, related tracks, Song Studio MP3 cache |
-| Voice chat | Assistant-user streaming, queue, pause, resume, skip, loop, shuffle, volume |
+| Music | YouTube search, MP3, video, smart autoplay, Instagram Reels, Snapchat Spotlight, YouTube Shorts, and other yt-dlp-supported public links |
+| Voice chat | Assistant-user streaming, priority group routing, queue, pause, resume, skip, loop, shuffle, volume |
 | UI | Animated README banner, branded start cards, player thumbnail template, compact result buttons |
 | Access | Daily credits at 00:01 IST, Premium, redeem codes, referrals, force-join verification |
 | Management | Owner/admin panel, admin list, broadcasts, group broadcasts, usage logs, payment QR |
-| Safety | 455 MB video limit, failed-download credit protection, YouTube cookie support, flood-safe progress edits |
+| Safety | Medium-quality downloads with size fallback, failed-download credit protection, cookie-less default, flood-safe progress edits |
 
 ## Screenshots and UI
 
@@ -171,6 +171,19 @@ COOKIES_FILE=/data/cookies.txt
 
 Close the browser before yt-dlp reads its cookie database. Never commit `cookies.txt`. See the official [yt-dlp cookie guide](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
 
+Cookies are optional. The bot is cookie-less by default. An owner/admin can reply to a Netscape-format `cookies.txt` document with `/setcookies`; use `/delcookies` to remove the runtime cookie file. Cookies are stored under `DOWNLOAD_DIR/cookies.txt` and should never be shared.
+
+## Telegram MTProto proxy
+
+Managers can save a Telegram MTProto proxy from the bot:
+
+```text
+/setproxy HOST PORT SECRET
+/delproxy
+```
+
+Restart the bot after changing the proxy. Proxy credentials are stored beside `STATE_DB` in `telegram_proxy.json`; keep that file private.
+
 ## Telegram setup checklist
 
 1. Create an API ID/hash at [my.telegram.org](https://my.telegram.org).
@@ -189,7 +202,7 @@ If a host still sends a code to the previous number, update `ASSISTANT_PHONE`, `
 
 ### Visible command menu
 
-`/start` · `/send` · `/video` · `/play` · `/search` · `/ping` · `/help`
+`/start` · `/send` · `/video` · `/play` · `/playlist` · `/search` · `/ping` · `/help`
 
 The full command list is intentionally inside `/help` so the Telegram command menu stays clean.
 
@@ -200,7 +213,7 @@ The full command list is intentionally inside `/help` so the Telegram command me
 | `/start` | Open the branded menu and verify force-join |
 | `/search <song>` | Search five results and choose Play, Music, or Video |
 | `/send <song or link>` | Send an MP3; one successful private result costs one credit |
-| `/video [quality] <song or link>` | Send a video; files above 455 MB are rejected |
+| `/video [quality] <song or link>` | Send a video; defaults to 480p and retries 360p if the file is too large |
 | `/play <song or link>` | Play or queue music in a group voice chat |
 | `/balance` | View credits, Premium, admin, or owner status |
 | `/redeem <code>` | Redeem credits issued by management |
@@ -211,9 +224,25 @@ The full command list is intentionally inside `/help` so the Telegram command me
 
 `/auto`, `/now`, `/queue`, `/pause`, `/resume`, `/skip`, `/stop`, `/leave`, `/loop`, `/shuffle`, `/volume`, `/remove`, `/clear`, `/history`
 
+### Group favorite playlist
+
+Group admins can manage the group’s Song Studio playlist:
+
+```text
+/playlist add SONG_OR_LINK
+/playlist list
+/playlist send NUMBER
+/playlist remove NUMBER
+/playlist clear
+```
+
+All members can view the playlist and use `/playlist send NUMBER`. Only group admins can add, remove, or clear songs. Playlist audio and group/member metadata are stored in the configured Song Studio channel; copied songs hide the original channel sender. Smart autoplay uses this playlist before choosing related tracks.
+
 ### Owner/admin commands
 
-`/panel`, `/adminlist`, `/addadmin`, `/deladmin`, `/premium`, `/addcredits`, `/code`, `/forcejoin`, `/unforcejoin`, `/broadcast`, `/broadcastgc`, `/logs`, `/setqr`
+`/panel`, `/adminlist`, `/addadmin`, `/deladmin`, `/premium`, `/addcredits`, `/code`, `/forcejoin`, `/unforcejoin`, `/broadcast`, `/broadcastgc`, `/logs`, `/setqr`, `/setcookies`, `/delcookies`, `/setproxy`, `/delproxy`
+
+Owner-only assistant commands are `/assistant`, `/setassistant PHONE USER_ID`, and `/clearassistant`. Assistant login verification is routed to the owner and includes the requesting group ID. The priority voice group is `-1004220556565`; other groups can use the assistant when that group is inactive.
 
 Use `/help` inside Telegram for current descriptions and role-specific tools.
 
@@ -224,6 +253,8 @@ Use `/help` inside Telegram for current descriptions and role-specific tools.
 - Groups have unlimited search and playback after verification.
 - Premium users receive unlimited access and do not see purchase prompts.
 - MP3s cached in Song Studio are forwarded quickly without re-downloading.
+- Audio defaults to 128 kbps and retries at 96 kbps when needed.
+- Progress cards refresh every 20 seconds for tracks longer than one minute and every 11 seconds for shorter tracks.
 
 ## Configuration
 

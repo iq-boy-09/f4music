@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import html
+import json
 import logging
 import math
 import re
@@ -7,12 +9,15 @@ import secrets
 import shutil
 import tempfile
 import time
+import zlib
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
-from urllib.request import urlopen
 
 from PIL import Image, ImageOps
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from pyrogram import ContinuePropagation, filters
 from pyrogram.enums import ChatMemberStatus, ChatType, MessagesFilter
 from pyrogram.errors import FloodWait, MessageNotModified
@@ -24,10 +29,28 @@ from .voice import LOOP_MODES, NoActiveCall, QueueFull, VoicePlayer
 
 logger = logging.getLogger(__name__)
 
+HTTP_SESSION = requests.Session()
+HTTP_SESSION.headers.update({"User-Agent": "F4-Music-Bot/1.0"})
+HTTP_SESSION.mount(
+    "https://",
+    HTTPAdapter(
+        pool_connections=4,
+        pool_maxsize=8,
+        max_retries=Retry(
+            total=2,
+            backoff_factor=0.3,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET"}),
+        ),
+    ),
+)
+
 GROUP_TYPES = (ChatType.GROUP, ChatType.SUPERGROUP)
 LOOP_LABEL = {"off": "Off", "one": "Track", "all": "Queue"}
 NUMBERS = ["1", "2", "3", "4", "5", "6", "7", "8"]
 VIDEO_QUALITIES = (144, 240, 360, 480, 720, 1080)
+DEFAULT_VIDEO_HEIGHT = 480
+LOW_VIDEO_HEIGHT = 360
 MAX_VIDEO_BYTES = 455 * 1024 * 1024
 CREDIT_LINE = "<i>✦ F4 MUSIC · crafted by @f4did ✦</i>"
 DOWNLOAD_CAPTION = "<i>✦ made by @f4did · F4 MUSIC ✦</i>"
@@ -37,7 +60,7 @@ SONG_STUDIO_CHAT_ID = -1003853614558
 GROUP_COMMANDS = [
     "play", "gplay", "p", "auto", "now", "queue", "gqueue", "skip", "gskip", "pause", "gpause",
     "resume", "gresume", "stop", "gstop", "leave", "gleave", "loop", "shuffle", "volume",
-    "remove", "clear", "history",
+    "remove", "clear", "history", "playlist",
 ]
 
 HOME_TEXT = (
@@ -78,6 +101,7 @@ def help_text(in_group: bool, manager: bool = False) -> str:
             "/pause · /resume · /skip · /stop · /leave\n"
             "/loop <i>off|one|all</i> · /shuffle · /volume <i>1-200</i>\n"
             "/remove <i>number</i> · /clear · /history\n"
+            "/playlist <i>add|list|send|remove|clear</i> — group smart-next favorites\n"
         )
     else:
         text += "<b>Private chat</b>\nMP3 and video downloads use one credit per successful result. Groups have unlimited searches and playback.\n"
@@ -87,6 +111,7 @@ def help_text(in_group: bool, manager: bool = False) -> str:
             "/panel · /adminlist · /addadmin · /deladmin · /premium\n"
             "/addcredits · /code · /forcejoin · /unforcejoin\n"
             "/broadcast · /broadcastgc · /logs · /setqr\n"
+            "/setcookies · /delcookies · /setproxy · /delproxy\n"
         )
     return text + "\n" + CREDIT_LINE
 
@@ -142,7 +167,7 @@ PANELS = {
             "Reply to a message containing a song name with /play to use its text.",
     "send": "🎵 <b>Get an MP3</b>\n\n/send <i>song name</i> — or just message me the name in private chat.",
     "video": "🎬 <b>Get a video</b>\n\n/video <i>720p song name</i>\n"
-             "Qualities: " + ", ".join(f"{q}p" for q in VIDEO_QUALITIES) + " (default 360p).",
+             "Qualities: " + ", ".join(f"{q}p" for q in VIDEO_QUALITIES) + " (default 480p).",
     "controls": "🎛 <b>Player controls</b>\n\n"
                 "The player card has pause/resume, skip, stop, loop, shuffle, volume and queue buttons.\n\n"
                 "/pause · /resume · /skip · /stop · /leave\n"
@@ -227,25 +252,27 @@ def friendly_error(exc) -> str:
     text = str(exc) or exc.__class__.__name__
     low = text.lower()
     if "phone_number_invalid" in low:
-        return "The assistant account's phone number was rejected. Use a normal Telegram user account."
+        return "Assistant account phone number was rejected."
     if "peer id invalid" in low or "peer_id_invalid" in low:
-        return "The assistant account can't see this group yet. Add it to the group, start the voice chat and try again."
+        return "Assistant account cannot access this chat."
     if "sign in to confirm" in low or "sign-in verification" in low or "not a bot" in low:
-        return (
-            "YouTube is asking for verification. Set <code>COOKIES_FROM_BROWSER=chrome</code> "
-            "(or edge/firefox) in .env while logged into YouTube, or set <code>COOKIES_FILE</code> "
-            "to a Netscape cookies.txt file, then restart the bot."
-        )
+        return "YouTube verification is required."
     if "ffmpeg" in low:
-        return "FFmpeg is missing. Install it and make sure it is on your PATH."
+        return "FFmpeg is missing."
     if "chat_admin_required" in low or "requires chat admin privileges" in low:
-        return (
-            "Telegram requires the assistant account to be a group admin with Manage Video Chats, "
-            "or start a voice chat in the group before using /play."
-        )
+        return "Assistant account needs chat permissions."
     if "unavailable" in low or "private video" in low or "removed" in low:
-        return "That video is unavailable."
-    return esc(text[:300])
+        return "Video is unavailable or private."
+    if "no audio format" in low or "nothing playable" in low or "no playable" in low:
+        return "No playable format was found."
+    if "too large" in low or "file size" in low:
+        return "File is too large for Telegram."
+    return "Source could not be downloaded."
+
+
+def download_error(exc) -> str:
+    """Keep download failures short and consistent for users."""
+    return f"❌ <b>This cannot be downloaded by bot.</b>\nReason: {friendly_error(exc)}"
 
 
 async def safe_callback_answer(callback, *args, **kwargs):
@@ -317,6 +344,7 @@ def panel_kb():
         [Btn("📊 Overview", callback_data="panel:stats"), Btn("👤 Users", callback_data="panel:users")],
         [Btn("💎 Premium", callback_data="panel:premium"), Btn("🛡 Admins", callback_data="panel:admins")],
         [Btn("👥 Groups", callback_data="panel:groups"), Btn("📢 Force Join", callback_data="panel:channels")],
+        [Btn("🍪 Cookies", callback_data="panel:cookies"), Btn("⚙️ Settings", callback_data="panel:settings")],
         [Btn("📣 Broadcast", callback_data="panel:broadcast"), Btn("🧾 Logs & Commands", callback_data="panel:help")],
         [Btn("🏠 Home", callback_data="panel:back")],
     ])
@@ -377,8 +405,9 @@ def _compose_template_sync(template_path: Path, thumb_url: str):
     if not template_path.is_file() or not thumb_url:
         return None
     try:
-        with urlopen(thumb_url, timeout=15) as response:
-            thumb_data = response.read()
+        response = HTTP_SESSION.get(thumb_url, timeout=(5, 15))
+        response.raise_for_status()
+        thumb_data = response.content
         with Image.open(template_path) as source, Image.open(BytesIO(thumb_data)) as thumb:
             template = source.convert("RGB")
             # Coordinates are from the supplied 1672x941 template.
@@ -422,7 +451,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         async def assistant_login_reply(client, message):
             if not login_bridge.active:
                 raise ContinuePropagation
-            if not message.from_user or message.from_user.id not in cfg.owner_ids:
+            if not message.from_user or message.from_user.id not in login_bridge.owner_ids:
                 return
             accepted = await login_bridge.submit(message.text.strip())
             if accepted:
@@ -461,6 +490,75 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         except Exception:
             logger.debug("Song Studio search failed", exc_info=True)
         return None
+
+    def playlist_marker(payload) -> str:
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        marker = "F4PLAYLIST:" + base64.urlsafe_b64encode(zlib.compress(raw, 9)).decode("ascii")
+        return (
+            f"{marker}\n"
+            f"📍 Group: {esc(payload.get('group') or 'Unknown')}\n"
+            f"🆔 <code>{payload.get('chat_id')}</code>\n"
+            f"👤 Added by: {esc(payload.get('by') or payload.get('added_by') or 'Unknown')}"
+        )
+
+    def playlist_payload(message):
+        caption = message.caption or ""
+        if not caption.startswith("F4PLAYLIST:"):
+            return None
+        try:
+            encoded = caption.splitlines()[0].split(":", 1)[1]
+            raw = base64.urlsafe_b64decode(encoded.encode("ascii"))
+            return json.loads(zlib.decompress(raw).decode("utf-8"))
+        except (ValueError, TypeError, KeyError, zlib.error, json.JSONDecodeError):
+            return None
+
+    def playlist_index_marker(index) -> str:
+        raw = json.dumps(index, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return "F4PLAYLIST_INDEX:" + base64.urlsafe_b64encode(zlib.compress(raw, 9)).decode("ascii")
+
+    def playlist_index_payload(message):
+        text = (message.text or message.caption or "") if message else ""
+        if not text.startswith("F4PLAYLIST_INDEX:"):
+            return None
+        try:
+            encoded = text.splitlines()[0].split(":", 1)[1]
+            raw = base64.urlsafe_b64decode(encoded.encode("ascii"))
+            return json.loads(zlib.decompress(raw).decode("utf-8"))
+        except (ValueError, TypeError, KeyError, zlib.error, json.JSONDecodeError):
+            return None
+
+    async def load_playlist_index(client):
+        chat = await client.get_chat(SONG_STUDIO_CHAT_ID)
+        pinned = getattr(chat, "pinned_message", None)
+        index = playlist_index_payload(pinned) if pinned else None
+        return (index if isinstance(index, dict) else {"groups": {}}, pinned if isinstance(index, dict) else None)
+
+    async def save_playlist_index(client, index, pinned=None):
+        text = playlist_index_marker(index)
+        if pinned:
+            await client.edit_message_text(SONG_STUDIO_CHAT_ID, pinned.id, text)
+            return pinned
+        message = await client.send_message(SONG_STUDIO_CHAT_ID, text, disable_notification=True)
+        try:
+            await client.pin_chat_message(SONG_STUDIO_CHAT_ID, message.id, disable_notification=True)
+        except Exception:
+            logger.warning("Could not pin Song Studio playlist index", exc_info=True)
+        return message
+
+    async def channel_playlist(client, chat_id):
+        """Read this group's playlist records directly from Song Studio."""
+        rows = []
+        try:
+            index, _ = await load_playlist_index(client)
+            records = index.get("groups", {}).get(str(chat_id), [])
+            for payload in records:
+                message = await client.get_messages(SONG_STUDIO_CHAT_ID, int(payload["message_id"]))
+                if message and message.audio:
+                    rows.append((message, payload))
+        except Exception:
+            logger.exception("Could not read Song Studio playlist index")
+        rows.sort(key=lambda row: (float(row[1].get("last_played", 0)), row[0].id))
+        return rows
 
     async def copy_studio_audio(client, chat_id, status, query_or_title):
         """Copy cached MP3 with no source attribution and the standard caption."""
@@ -674,7 +772,8 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         """Keep the player progress bar current without requiring button taps."""
         try:
             while player.current.get(chat_id) and chat_id in cards:
-                await asyncio.sleep(12)
+                duration = player.current.get(chat_id).duration or 0
+                await asyncio.sleep(20 if duration > 60 else 11)
                 await refresh_card(chat_id)
         except asyncio.CancelledError:
             pass
@@ -702,9 +801,70 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
     async def on_track(chat_id, item):
         await publish_card(chat_id)
 
+    async def smart_next(chat_id):
+        """Play a group favorite first, then choose an unseen related track."""
+        recent = store.history(chat_id, limit=12)
+        recent_sources = {item.source for item in recent}
+        favorite_rows = await channel_playlist(app, chat_id)
+        if favorite_rows:
+            stored_message, payload = favorite_rows[0]
+            item = QueueItem(
+                title=payload.get("title") or stored_message.audio.title or "Untitled",
+                source=payload.get("source") or "",
+                requested_by=int(payload.get("added_by") or 0),
+                requester=payload.get("by") or "Group playlist",
+                duration=int(payload.get("duration") or stored_message.audio.duration or 0),
+                uploader=payload.get("uploader") or stored_message.audio.performer or "",
+                thumb="",
+            )
+            try:
+                if not item.source:
+                    return False
+                await player.enqueue_and_play(chat_id, item)
+                payload["last_played"] = time.time()
+                index, pinned = await load_playlist_index(app)
+                for record in index.get("groups", {}).get(str(chat_id), []):
+                    if int(record.get("message_id", 0)) == stored_message.id:
+                        record["last_played"] = payload["last_played"]
+                        break
+                await save_playlist_index(app, index, pinned)
+                return True
+            except Exception:
+                logger.exception("Smart playlist item failed in chat %s", chat_id)
+
+        if not recent:
+            return False
+        try:
+            suggestions = await media.related(recent[0].source, recent[0].title, limit=8)
+        except Exception:
+            logger.debug("Smart autoplay lookup failed for chat %s", chat_id, exc_info=True)
+            return False
+        suggestion = next(
+            (meta for meta in suggestions if meta.get("source") and meta["source"] not in recent_sources),
+            None,
+        )
+        if not suggestion:
+            return False
+        item = QueueItem(
+            title=suggestion["title"], source=suggestion["source"], requested_by=0,
+            requester="Smart autoplay", duration=suggestion["duration"],
+            uploader=suggestion["uploader"], thumb=suggestion["thumb"],
+        )
+        try:
+            await player.enqueue_and_play(chat_id, item)
+            return True
+        except Exception:
+            logger.exception("Smart autoplay failed in chat %s", chat_id)
+            return False
+
     async def on_end(chat_id, reason, ended_by=""):
         if reason == "closed":
             await end_card(chat_id, "🔇 <b>Voice chat ended</b>\nThe queue was cleared.")
+            return
+        if reason == "queue_end":
+            if await smart_next(chat_id):
+                return
+            await end_card(chat_id, "✅ <b>All songs played</b>\nUse /play to start again.")
             return
         suffix = f"\n👤 Finished by <b>{esc(ended_by)}</b>" if ended_by else ""
         await end_card(chat_id, f"🏁 <b>Queue finished</b>{suffix}\nUse /play to keep the music going.")
@@ -742,6 +902,11 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
 
     async def check_setup(client, chat):
         """Return an HTML error message, or None when playback can start."""
+        if player.priority_blocked(chat.id):
+            return (
+                "⏳ <b>Assistant is serving the priority group right now.</b>\n"
+                f"Try again after <code>{player.priority_chat_id}</code> finishes."
+            )
         if time.monotonic() < setup_ok.get(chat.id, 0):
             return None
         me = await client.get_chat_member(chat.id, "me")
@@ -763,6 +928,10 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
                 + "\n\nThen run the command again."
             )
 
+        if login_bridge:
+            login_bridge.set_request_context(chat.id, chat.title or "")
+        if player.priority_chat_id == chat.id:
+            await player.release_other_chats(chat.id)
         await player.start()
         assistant = await player.assistant_me()
         try:
@@ -895,7 +1064,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
                 return await deliver(client, chat.id, status, first, "audio")
             await edit_card(status, f"⚠️ Could not play this song.\n{friendly_error(exc)}")
 
-    async def deliver(client, chat_id, status, meta, kind, height=360):
+    async def deliver(client, chat_id, status, meta, kind, height=DEFAULT_VIDEO_HEIGHT, quality_locked=False):
         title = meta["title"]
         if kind == "audio":
             if await copy_studio_audio(client, chat_id, status, title):
@@ -938,14 +1107,21 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
                     path, title, duration = await media.download_video(meta["source"], height, download_hook)
                 if kind == "video":
                     file_size = path.stat().st_size
+                    if file_size > MAX_VIDEO_BYTES and not quality_locked and height > LOW_VIDEO_HEIGHT:
+                        media.cleanup(path)
+                        await edit_card(
+                            status,
+                            "📉 <b>Medium quality is too large.</b> Trying lower quality…",
+                        )
+                        path, title, duration = await media.download_video(
+                            meta["source"], LOW_VIDEO_HEIGHT, download_hook
+                        )
+                        file_size = path.stat().st_size
                     if file_size > MAX_VIDEO_BYTES:
                         media.cleanup(path)
                         await edit_card(
                             status,
-                            "⚠️ <b>File size is too large.</b>\n"
-                            f"Size: <b>{fmt_bytes(file_size)}</b>\n"
-                            f"Limit: <b>{fmt_bytes(MAX_VIDEO_BYTES)}</b>\n\n"
-                            "Try a lower video quality, such as <code>/video 360p song name</code>.",
+                            download_error(ValueError("File size is too large")),
                         )
                         return False
                 last_edit = 0.0
@@ -992,10 +1168,10 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
                 return True
             except Exception as exc:
                 logger.exception("Download/send failed")
-                await edit_card(status, f"⚠️ Could not send it.\n{friendly_error(exc)}")
+                await edit_card(status, download_error(exc))
                 return False
 
-    async def media_command(client, message, kind, query, height=360):
+    async def media_command(client, message, kind, query, height=DEFAULT_VIDEO_HEIGHT, quality_locked=False):
         if not cfg.private_downloads:
             return await message.reply("🚫 Downloads are disabled in this bot's configuration.")
         uid, _ = who(message)
@@ -1016,14 +1192,16 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
             meta = (await media.lookup(query, limit=1))[0]
             if too_long(meta):
                 return await edit_card(status, f"⏭ That's longer than {cfg.max_duration // 60} minutes — too big to send.")
-            delivered = await deliver(client, message.chat.id, status, meta, kind, height)
+            delivered = await deliver(
+                client, message.chat.id, status, meta, kind, height, quality_locked
+            )
             charged = 0 if message.chat.type in GROUP_TYPES or store.is_premium(uid) else 1
             if delivered and charged:
                 store.consume_credits(uid, charged)
             store.log_usage(uid, message.chat.id, kind, query, delivered, charged if delivered else 0)
         except Exception as exc:
             logger.exception("Media request failed")
-            await edit_card(status, f"⚠️ Could not find or send that.\n{friendly_error(exc)}")
+            await edit_card(status, download_error(exc))
 
     async def show_results(client, message, query):
         is_group = message.chat.type in GROUP_TYPES
@@ -1069,7 +1247,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
     async def menu(client, message):
         display_name = "there"
         referral_notice = ""
-        if message.chat.type == ChatType.PRIVATE and message.from_user:
+        if message.chat.type == ChatType.PRIVATE and message.from_user and not message.from_user.is_bot:
             store.register_user(message.from_user.id, message.from_user.username or "")
             if len(message.command) > 1 and message.command[1].startswith("ref_"):
                 raw_referrer = message.command[1][4:]
@@ -1115,7 +1293,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
 
     @app.on_message(filters.command(["help"]))
     async def help_command(client, message):
-        if message.chat.type == ChatType.PRIVATE and message.from_user:
+        if message.chat.type == ChatType.PRIVATE and message.from_user and not message.from_user.is_bot:
             store.register_user(message.from_user.id, message.from_user.username or "")
         await message.reply(
             help_text(
@@ -1242,7 +1420,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
             lines.append(f"🛡 <code>{uid}</code> · {('@' + username) if username else 'no username'} · ADMIN")
         await message.reply(("\n".join(lines) if len(lines) > 2 else "🛡 <b>No added admins yet.</b>") + "\n\n" + CREDIT_LINE)
 
-    @app.on_callback_query(filters.regex(r"^panel:(home|back|stats|users|premium|admins|groups|channels|broadcast|help)$"))
+    @app.on_callback_query(filters.regex(r"^panel:(home|back|stats|users|premium|admins|groups|channels|cookies|settings|broadcast|help)$"))
     async def panel_callback(client, callback):
         if not callback.from_user or not is_manager(callback.from_user.id):
             return await safe_callback_answer(callback, "Owner/admin access only.", show_alert=True)
@@ -1319,6 +1497,22 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
                 f"<code>{cid}</code> · {esc(title or username or 'channel')} · {'link ready' if invite_link else 'no link'}"
                 for cid, title, username, invite_link in rows
             ) or "None")
+        elif key == "cookies":
+            active = bool(media.cookies_file and Path(media.cookies_file).is_file())
+            text = (
+                "🍪 <b>Download cookies</b>\n"
+                f"Status: <b>{'Active' if active else 'Cookie-less (default)'}</b>\n\n"
+                "Reply to a Netscape cookies.txt document with <code>/setcookies</code> "
+                "or use <code>/delcookies</code> to return to cookie-less mode."
+            )
+        elif key == "settings":
+            text = (
+                "⚙️ <b>Runtime settings</b>\n"
+                f"Download slots: <code>{cfg.download_slots}</code>\n"
+                f"Group MP3 fallback: <code>{'ON' if cfg.group_audio_fallback else 'OFF'}</code>\n"
+                f"Cookies: <code>{'ON' if media.cookies_file else 'OFF'}</code>\n\n"
+                "Public downloads stay cookie-less unless an admin adds cookies."
+            )
         elif key == "broadcast":
             text = "📣 Use <code>/broadcast</code> with text or reply to any message.\nUse <code>/broadcastgc CHAT_ID</code> for one group."
         else:
@@ -1327,7 +1521,8 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
                 "/addadmin USER_ID\n/deladmin USER_ID\n/forcejoin @channel\n"
                 "/unforcejoin CHAT_ID\n/premium USER_ID 1d|2d|7d|perma\n"
                 "/code CREDITS [USES]\n/redeem CODE\n/balance\n/logs [USER_ID]\n"
-                "/broadcast TEXT or reply to media\n/broadcastgc CHAT_ID TEXT"
+                "/broadcast TEXT or reply to media\n/broadcastgc CHAT_ID TEXT\n"
+                "/setcookies (reply to cookies.txt)\n/setproxy HOST PORT SECRET"
             )
         if callback.message:
             await edit_card(callback.message, text + "\n\n" + CREDIT_LINE, panel_kb())
@@ -1491,6 +1686,131 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         except Exception as exc:
             await message.reply(f"⚠️ Could not save QR: {friendly_error(exc)}")
 
+    @app.on_message(filters.private & filters.command(["setcookies"]))
+    async def set_cookies_command(client, message):
+        if not manager_only(message):
+            return await message.reply("⛔ Owner/admin access only.")
+        source = message.reply_to_message
+        document = source.document if source else None
+        filename = (document.file_name or "").lower() if document else ""
+        if not document or not filename.endswith((".txt", ".cookies")):
+            return await message.reply(
+                "Reply to a Netscape-format <code>cookies.txt</code> document with <code>/setcookies</code>."
+            )
+        try:
+            cfg.download_dir.mkdir(parents=True, exist_ok=True)
+            cookie_path = cfg.download_dir / "cookies.txt"
+            await source.download(file_name=str(cookie_path))
+            media.set_cookies_file(cookie_path)
+            await message.reply(
+                "✅ Cookies enabled for downloads.\n"
+                "Public links still use cookie-less mode unless cookies are needed."
+            )
+        except Exception as exc:
+            await message.reply(f"⚠️ Could not save cookies: {friendly_error(exc)}")
+
+    @app.on_message(filters.private & filters.command(["delcookies"]))
+    async def delete_cookies_command(client, message):
+        if not manager_only(message):
+            return await message.reply("⛔ Owner/admin access only.")
+        cookie_path = cfg.download_dir / "cookies.txt"
+        try:
+            media.set_cookies_file(None)
+            cookie_path.unlink(missing_ok=True)
+            await message.reply("✅ Cookies removed. Downloads are now cookie-less.")
+        except Exception as exc:
+            await message.reply(f"⚠️ Could not remove cookies: {friendly_error(exc)}")
+
+    @app.on_message(filters.private & filters.command(["setproxy"]))
+    async def set_proxy_command(client, message):
+        if not manager_only(message):
+            return await message.reply("⛔ Owner/admin access only.")
+        if len(message.command) != 4 or not message.command[2].isdigit():
+            return await message.reply("Usage: <code>/setproxy HOST PORT SECRET</code>\nMTProto proxy only.")
+        host, port, secret = message.command[1].strip(), int(message.command[2]), message.command[3].strip()
+        if not host or not 1 <= port <= 65535 or not secret:
+            return await message.reply("Invalid proxy details.")
+        proxy_file = cfg.state_db.with_name("telegram_proxy.json")
+        try:
+            proxy_file.write_text(
+                json.dumps({"host": host, "port": port, "secret": secret}),
+                encoding="utf-8",
+            )
+            await message.reply("✅ Telegram MTProto proxy saved.\nRestart the bot to apply it.")
+        except Exception as exc:
+            await message.reply(f"⚠️ Could not save proxy: {friendly_error(exc)}")
+
+    @app.on_message(filters.private & filters.command(["delproxy"]))
+    async def delete_proxy_command(client, message):
+        if not manager_only(message):
+            return await message.reply("⛔ Owner/admin access only.")
+        try:
+            cfg.state_db.with_name("telegram_proxy.json").unlink(missing_ok=True)
+            await message.reply("✅ Telegram proxy removed. Restart the bot to use direct connections.")
+        except Exception as exc:
+            await message.reply(f"⚠️ Could not remove proxy: {friendly_error(exc)}")
+
+    @app.on_message(filters.private & filters.command(["assistant"]))
+    async def assistant_status_command(client, message):
+        if not is_owner(message.from_user.id if message.from_user else 0):
+            return await message.reply("⛔ Owner only.")
+        phone = cfg.assistant_phone or "not set"
+        masked = phone[:3] + "***" + phone[-3:] if len(phone) >= 6 else phone
+        await message.reply(
+            "🤖 <b>Assistant configuration</b>\n"
+            f"Phone: <code>{esc(masked)}</code>\n"
+            f"User ID: <code>{cfg.assistant_user_id or 'not set'}</code>\n"
+            f"Session: <code>{esc(cfg.assistant_session)}</code>\n"
+            "Only the owner can view or change these values."
+        )
+
+    @app.on_message(filters.private & filters.command(["setassistant"]))
+    async def set_assistant_command(client, message):
+        if not is_owner(message.from_user.id if message.from_user else 0):
+            return await message.reply("⛔ Owner only.")
+        if len(message.command) != 3 or not message.command[2].isdigit():
+            return await message.reply("Usage: <code>/setassistant PHONE USER_ID</code>")
+        phone, user_id = message.command[1].strip(), int(message.command[2])
+        if not re.fullmatch(r"\+?[0-9][0-9 -]{5,20}", phone) or user_id <= 0:
+            return await message.reply("Invalid assistant phone or user ID.")
+        assistant_file = cfg.state_db.with_name("assistant_config.json")
+        try:
+            assistant_file.write_text(
+                json.dumps({
+                    "phone": phone,
+                    "user_id": user_id,
+                    "session": f"voice_assistant_{user_id}",
+                }),
+                encoding="utf-8",
+            )
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            await client.send_message(
+                message.from_user.id,
+                "✅ New assistant configuration saved securely.\n"
+                f"User ID: <code>{user_id}</code>\n"
+                "Restart the bot to use it. The previous assistant session is no longer selected."
+            )
+        except Exception as exc:
+            await message.reply(f"⚠️ Could not save assistant configuration: {friendly_error(exc)}")
+
+    @app.on_message(filters.private & filters.command(["clearassistant"]))
+    async def clear_assistant_command(client, message):
+        if not is_owner(message.from_user.id if message.from_user else 0):
+            return await message.reply("⛔ Owner only.")
+        try:
+            cfg.state_db.with_name("assistant_config.json").write_text(
+                json.dumps({"phone": "", "user_id": "", "session": "voice_assistant_unconfigured"}),
+                encoding="utf-8",
+            )
+            await message.reply(
+                "✅ Assistant configuration cleared. Restart the bot before adding another assistant."
+            )
+        except Exception as exc:
+            await message.reply(f"⚠️ Could not clear assistant configuration: {friendly_error(exc)}")
+
     @app.on_message(filters.private & filters.command(["claim"]))
     async def claim_payment(client, message):
         uid = message.from_user.id
@@ -1564,13 +1884,16 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         if len(message.command) < 2 or not message.command[1].lstrip("-").isdigit():
             return await message.reply("Usage: <code>/broadcastgc CHAT_ID TEXT</code> or reply to media.")
         chat_id = int(message.command[1])
-        text = " ".join(message.command[2:]).strip()
+        raw = message.text or message.caption or ""
+        parts = raw.split(maxsplit=2)
+        text = parts[2].strip() if len(parts) > 2 else ""
+        safe_text = esc(text)
         source = message.reply_to_message
         try:
             if source and not text:
                 await client.copy_message(chat_id, source.chat.id, source.id)
             elif text:
-                await client.send_message(chat_id, text)
+                await client.send_message(chat_id, safe_text)
             else:
                 return await message.reply("Add text or reply to a message/media.")
             await message.reply("✅ Sent to the group.")
@@ -1589,7 +1912,10 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
     async def broadcast(client, message):
         if not manager_only(message):
             return await message.reply("⛔ Owner/admin access only.")
-        text = " ".join(message.command[1:]).strip()
+        raw = message.text or message.caption or ""
+        parts = raw.split(maxsplit=1)
+        text = parts[1].strip() if len(parts) > 1 else ""
+        safe_text = esc(text)
         source = message.reply_to_message
         if not text and not source:
             return await message.reply(
@@ -1603,7 +1929,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
                 if source and not text:
                     await client.copy_message(target_id, source.chat.id, source.id)
                 else:
-                    await client.send_message(target_id, text)
+                    await client.send_message(target_id, safe_text)
                 sent += 1
             except FloodWait as exc:
                 await asyncio.sleep(exc.value)
@@ -1611,7 +1937,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
                     if source and not text:
                         await client.copy_message(target_id, source.chat.id, source.id)
                     else:
-                        await client.send_message(target_id, text)
+                        await client.send_message(target_id, safe_text)
                     sent += 1
                 except Exception:
                     failed += 1
@@ -1636,7 +1962,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
 
     @app.on_message(filters.private & filters.text & ~filters.regex(r"^/"))
     async def private_text(client, message):
-        if message.from_user:
+        if message.from_user and not message.from_user.is_bot:
             store.register_user(message.from_user.id, message.from_user.username or "")
         await show_results(client, message, message.text.strip()[:200])
 
@@ -1655,9 +1981,11 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
     @app.on_message(filters.command(["video"]))
     async def video_command(client, message):
         args = message.command[1:]
-        height = 360
+        height = DEFAULT_VIDEO_HEIGHT
+        quality_locked = False
         if args and re.fullmatch(r"\d{3,4}p?", args[0].lower()):
             height = int(args[0].lower().rstrip("p"))
+            quality_locked = True
             args = args[1:]
             if height not in VIDEO_QUALITIES:
                 return await message.reply("Quality must be " + ", ".join(f"{q}p" for q in VIDEO_QUALITIES) + ".")
@@ -1666,7 +1994,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
             query = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
         if not query:
             return await message.reply("Usage: <code>/video 720p song name</code>")
-        await media_command(client, message, "video", query[:200], height)
+        await media_command(client, message, "video", query[:200], height, quality_locked)
 
     @app.on_callback_query(filters.regex(r"^s:(\w{6}):(\d|x):(p|a|v|x)$"))
     async def pick_callback(client, callback):
@@ -1758,6 +2086,139 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
         if not player.current.get(message.chat.id):
             return await message.reply(now_text(message.chat.id))
         await publish_card(message.chat.id)
+
+    @app.on_message(filters.group & filters.command(["playlist"]))
+    async def playlist_command(client, message):
+        uid, uname = who(message)
+        access_error = await user_access(client, message.chat, uid)
+        if access_error:
+            return await message.reply(access_error, disable_web_page_preview=True)
+        args = message.command[1:]
+        action = args[0].lower() if args else "list"
+        chat_id = message.chat.id
+
+        async def playlist_admin_only():
+            if message.sender_chat and message.sender_chat.id == chat_id:
+                return True
+            if not message.from_user:
+                return False
+            try:
+                return is_admin(await client.get_chat_member(chat_id, message.from_user.id))
+            except Exception:
+                logger.debug("Could not check group playlist admin", exc_info=True)
+                return False
+
+        if action == "list":
+            rows = await channel_playlist(client, chat_id)
+            if not rows:
+                return await message.reply(
+                    "⭐ <b>Group playlist is empty.</b>\n\n"
+                    "🛡 Admins: <code>/playlist add SONG</code>\n"
+                    "👥 Members: wait for an admin to add songs."
+                )
+            lines = ["⭐ <b>Group smart playlist</b>", ""]
+            for index, (stored_message, payload) in enumerate(rows, 1):
+                added_by = mention(payload.get("added_by"), payload.get("by") or "someone")
+                lines.append(f"<code>{index:>2}.</code> {esc(payload.get('title') or 'Untitled')}\n   Added by {added_by}")
+            lines += [
+                "",
+                "👥 Members: <code>/playlist send NUMBER</code>",
+                "🛡 Admins: <code>/playlist add SONG</code> · <code>/playlist remove NUMBER</code> · <code>/playlist clear</code>",
+            ]
+            return await message.reply("\n".join(lines))
+        if action == "add":
+            if not await playlist_admin_only():
+                return await message.reply("⛔ Only admins of this group can add playlist songs.")
+            query = " ".join(args[1:]).strip()
+            if not query:
+                return await message.reply("Usage: <code>/playlist add song name or link</code>")
+            status = await message.reply("⭐ <b>Adding to group playlist…</b>")
+            path = None
+            try:
+                meta = (await media.lookup(query, limit=1))[0]
+                rows = await channel_playlist(client, chat_id)
+                if any(payload.get("source") == meta["source"] for _, payload in rows):
+                    return await edit_card(status, "ℹ️ That song is already in this group's playlist.")
+                await edit_card(status, "⬇️ <b>Saving song in Song Studio…</b>")
+                path, title, artist, duration = await media.download(meta["source"])
+                payload = {
+                    "chat_id": chat_id,
+                    "group": (message.chat.title or "")[:100],
+                    "title": title[:200],
+                    "source": meta["source"][:700],
+                    "duration": duration,
+                    "uploader": (artist or meta.get("uploader") or "")[:100],
+                    "added_by": uid,
+                    "by": (uname or "")[:64],
+                    "last_played": 0,
+                }
+                stored = await client.send_audio(
+                    SONG_STUDIO_CHAT_ID,
+                    str(path),
+                    caption=playlist_marker(payload),
+                    title=title,
+                    performer=artist or None,
+                    duration=duration or None,
+                )
+                index, pinned = await load_playlist_index(client)
+                index.setdefault("groups", {}).setdefault(str(chat_id), []).append(
+                    {**payload, "message_id": stored.id}
+                )
+                await save_playlist_index(client, index, pinned)
+                await edit_card(status, f"✅ Added <b>{esc(title)}</b> to this group's Song Studio playlist.")
+            except Exception as exc:
+                await edit_card(status, download_error(exc))
+            finally:
+                if path:
+                    media.cleanup(path)
+            return
+        if action in ("send", "get"):
+            if len(args) < 2 or not args[1].isdigit():
+                return await message.reply("Usage: <code>/playlist send NUMBER</code>")
+            rows = await channel_playlist(client, chat_id)
+            index = int(args[1]) - 1
+            if index < 0 or index >= len(rows):
+                return await message.reply("No playlist item at that number.")
+            stored_message, _ = rows[index]
+            try:
+                await client.copy_message(
+                    chat_id, SONG_STUDIO_CHAT_ID, stored_message.id, caption=DOWNLOAD_CAPTION
+                )
+                return
+            except Exception as exc:
+                return await message.reply(f"⚠️ Could not send playlist song: {friendly_error(exc)}")
+        if action == "remove":
+            if not await playlist_admin_only():
+                return await message.reply("⛔ Only admins of this group can remove playlist songs.")
+            if len(args) < 2 or not args[1].isdigit():
+                return await message.reply("Usage: <code>/playlist remove NUMBER</code>")
+            rows = await channel_playlist(client, chat_id)
+            index = int(args[1]) - 1
+            if index < 0 or index >= len(rows):
+                return await message.reply("No playlist item at that number.")
+            stored_message, payload = rows[index]
+            await client.delete_messages(SONG_STUDIO_CHAT_ID, stored_message.id)
+            playlist_index, pinned = await load_playlist_index(client)
+            playlist_index.setdefault("groups", {})[str(chat_id)] = [
+                record for record in playlist_index.get("groups", {}).get(str(chat_id), [])
+                if int(record.get("message_id", 0)) != stored_message.id
+            ]
+            await save_playlist_index(client, playlist_index, pinned)
+            return await message.reply(f"🗑 Removed <b>{esc(payload.get('title') or 'song')}</b> from the group playlist.")
+        if action == "clear":
+            if not await playlist_admin_only():
+                return await message.reply("⛔ Only admins of this group can clear the playlist.")
+            rows = await channel_playlist(client, chat_id)
+            if rows:
+                await client.delete_messages(SONG_STUDIO_CHAT_ID, [message.id for message, _ in rows])
+            playlist_index, pinned = await load_playlist_index(client)
+            playlist_index.setdefault("groups", {}).pop(str(chat_id), None)
+            await save_playlist_index(client, playlist_index, pinned)
+            return await message.reply("🗑 Group smart playlist cleared.")
+        await message.reply(
+            "Usage: <code>/playlist add SONG</code> · <code>/playlist list</code> · "
+            "<code>/playlist send NUMBER</code> · <code>/playlist remove NUMBER</code> · <code>/playlist clear</code>"
+        )
 
     @app.on_message(filters.group & filters.command(["queue", "gqueue"]))
     async def queue_command(client, message):
@@ -1926,7 +2387,7 @@ def register(app, player: VoicePlayer, media: YouTubeMedia, store: QueueStore, c
                 if new_item:
                     await publish_card(chat_id)
                 else:
-                    await edit_card(message, "🏁 <b>Queue finished</b>")
+                    await edit_card(message, "✅ <b>All songs played</b>\nUse /play to start again.")
             elif scope == "m" and action == "stop":
                 await player.stop(chat_id)
                 cards.pop(chat_id, None)

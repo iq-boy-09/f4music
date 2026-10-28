@@ -48,6 +48,7 @@ from .state import QueueItem, QueueStore
 logger = logging.getLogger(__name__)
 
 LOOP_MODES = ("off", "one", "all")
+PRIMARY_VOICE_CHAT_ID = -1004220556565
 
 
 class NoActiveCall(RuntimeError):
@@ -71,10 +72,11 @@ def _closing_mask():
 
 
 class VoicePlayer:
-    def __init__(self, assistant, store: QueueStore, media, max_queue: int = 10, default_volume: int = 100, assistant_user_id: int | None = None, login_success_callback=None):
+    def __init__(self, assistant, store: QueueStore, media, max_queue: int = 10, default_volume: int = 100, assistant_user_id: int | None = None, login_success_callback=None, priority_chat_id: int | None = PRIMARY_VOICE_CHAT_ID):
         self.assistant = assistant
         self.expected_assistant_user_id = assistant_user_id
         self.login_success_callback = login_success_callback
+        self.priority_chat_id = priority_chat_id
         self.store = store
         self.media = media
         self.max_queue = max_queue
@@ -183,6 +185,23 @@ class VoicePlayer:
         await self._hang_up(chat_id)
         self._forget(chat_id)
         self._notify(self.on_end, chat_id, reason, ended_by)
+
+    async def release_other_chats(self, keep_chat_id: int):
+        """Keep the priority group exclusive when it requests the assistant."""
+        for chat_id in list(self.active):
+            if chat_id == keep_chat_id:
+                continue
+            await self._hang_up(chat_id)
+            self.store.clear(chat_id)
+            self._forget(chat_id)
+            self._notify(self.on_end, chat_id, "priority_switch", "")
+
+    def priority_blocked(self, chat_id: int) -> bool:
+        return bool(
+            self.priority_chat_id
+            and chat_id != self.priority_chat_id
+            and self.priority_chat_id in self.active
+        )
 
     # ---- playback --------------------------------------------------------
     async def enqueue_and_play(self, chat_id: int, item: QueueItem) -> bool:

@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 URL_RE = re.compile(r"^https?://", re.I)
 VIDEO_ID_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/embed/|/live/)([\w-]{11})")
 BARE_ID_RE = re.compile(r"^[\w-]{11}$")
+YOUTUBE_HOST_RE = re.compile(r"(?:youtube\.com|youtu\.be)$", re.I)
 
 # Keep the default client first; explicit clients are only fallbacks.
 PLAYER_CLIENTS = (None, "web", "mweb", "ios", "tv_samsung")
@@ -57,6 +58,10 @@ class YouTubeMedia:
         self.cookies_from_browser = cookies_from_browser
         self.runtimes = {name: {} for name in ("deno", "node", "bun") if shutil.which(name)}
 
+    def set_cookies_file(self, path: Path | None):
+        """Update cookies at runtime without changing the default cookie-less mode."""
+        self.cookies_file = Path(path) if path else None
+
     # ---- helpers ---------------------------------------------------------
     def _opts(self, **extra):
         opts = {
@@ -64,7 +69,18 @@ class YouTubeMedia:
             "no_warnings": True,
             "noplaylist": True,
             "retries": 3,
+            "extractor_retries": 3,
+            "fragment_retries": 3,
+            "file_access_retries": 3,
             "socket_timeout": 15,
+            "geo_bypass": True,
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+            },
             "logger": _YtDlpLogger(),
         }
         if self.runtimes:
@@ -199,9 +215,10 @@ class YouTubeMedia:
 
     def _resolve_stream_sync(self, source: str) -> dict:
         last = None
-        for client in PLAYER_CLIENTS:
+        clients = PLAYER_CLIENTS if self._is_youtube(source) else (None,)
+        for client in clients:
             extra = {"format": "bestaudio/best", "fragment_retries": 3}
-            if client:
+            if client and self._is_youtube(source):
                 extra["extractor_args"] = {"youtube": {"player_client": [client]}}
             try:
                 with YoutubeDL(self._opts(**extra)) as ydl:
@@ -226,11 +243,12 @@ class YouTubeMedia:
     # ---- downloads -------------------------------------------------------
     def _extract_download(self, source: str, opts: dict, progress=None):
         last = None
-        for client in PLAYER_CLIENTS:
+        clients = PLAYER_CLIENTS if self._is_youtube(source) else (None,)
+        for client in clients:
             attempt = dict(opts)
             if progress:
                 attempt["progress_hooks"] = [progress]
-            if client:
+            if client and self._is_youtube(source):
                 attempt["extractor_args"] = {"youtube": {"player_client": [client]}}
             try:
                 with YoutubeDL(attempt) as ydl:
@@ -248,6 +266,11 @@ class YouTubeMedia:
                 if self._fatal(exc):
                     break
         raise MediaError(f"Download failed: {last}") from last
+
+    @staticmethod
+    def _is_youtube(source: str) -> bool:
+        host = re.sub(r"^www\.", "", (re.match(r"https?://([^/]+)", source or "", re.I) or (None, ""))[1].lower())
+        return bool(YOUTUBE_HOST_RE.fullmatch(host))
 
     def _download_sync(self, source: str, progress=None):
         if not shutil.which("ffmpeg"):

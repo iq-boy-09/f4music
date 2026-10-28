@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 
@@ -68,6 +69,7 @@ class Config:
     default_volume: int
     cookies_file: Path | None
     cookies_from_browser: str | None
+    telegram_proxy: dict | None
 
     @classmethod
     def load(cls):
@@ -93,13 +95,38 @@ class Config:
         if cookies_file and not cookies_file.is_file():
             raise ConfigError(f"COOKIES_FILE points to a missing file: {cookies_file}")
         cookies_from_browser = _env("COOKIES_FROM_BROWSER") or None
-        assistant_user = _env("ASSISTANT_USER_ID")
+        root = Path(__file__).resolve().parent.parent
+        state_db = Path(_env("STATE_DB", str(root / "musicbot.sqlite3")))
+        assistant_file = state_db.with_name("assistant_config.json")
+        assistant_override = {}
+        if assistant_file.is_file():
+            try:
+                assistant_override = json.loads(assistant_file.read_text(encoding="utf-8"))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                assistant_override = {}
+        proxy_file = state_db.with_name("telegram_proxy.json")
+        telegram_proxy = None
+        if proxy_file.is_file():
+            try:
+                saved_proxy = json.loads(proxy_file.read_text(encoding="utf-8"))
+                if saved_proxy.get("host") and int(saved_proxy.get("port", 0)) and saved_proxy.get("secret"):
+                    telegram_proxy = {
+                        "scheme": "mtproto",
+                        "hostname": str(saved_proxy["host"]),
+                        "port": int(saved_proxy["port"]),
+                        "secret": str(saved_proxy["secret"]),
+                    }
+            except (ValueError, OSError, TypeError, json.JSONDecodeError):
+                telegram_proxy = None
+        assistant_user = str(
+            assistant_override["user_id"]
+            if "user_id" in assistant_override else _env("ASSISTANT_USER_ID")
+        ).strip()
         try:
             assistant_user_id = int(assistant_user) if assistant_user else None
         except ValueError as exc:
             raise ConfigError("ASSISTANT_USER_ID must be a Telegram user ID") from exc
 
-        root = Path(__file__).resolve().parent.parent
         owner_ids = _id_list("OWNER_IDS")
         superowner_ids = _id_list("SUPEROWNER_IDS")
         return cls(
@@ -107,12 +134,17 @@ class Config:
             api_hash=api_hash,
             bot_token=bot_token,
             bot_session=_env("BOT_SESSION", "command_bot_live"),
-            assistant_session=_env("ASSISTANT_SESSION", "voice_assistant"),
-            assistant_phone=_env("ASSISTANT_PHONE") or None,
+            assistant_session=str(
+                assistant_override.get("session") or _env("ASSISTANT_SESSION", "voice_assistant")
+            ).strip(),
+            assistant_phone=(str(
+                assistant_override["phone"]
+                if "phone" in assistant_override else _env("ASSISTANT_PHONE")
+            ).strip() or None),
             assistant_user_id=assistant_user_id,
             assistant_username=_env("ASSISTANT_USERNAME") or None,
             startup_chat_id=startup_chat_id,
-            state_db=Path(_env("STATE_DB", str(root / "musicbot.sqlite3"))),
+            state_db=state_db,
             download_dir=Path(_env("DOWNLOAD_DIR", str(root / "downloads"))),
             private_downloads=_flag("PRIVATE_DOWNLOADS", False),
             group_audio_fallback=_flag("GROUP_AUDIO_FALLBACK", True),
@@ -127,4 +159,5 @@ class Config:
             default_volume=_number("DEFAULT_VOLUME", 100, 1, 200),
             cookies_file=cookies_file,
             cookies_from_browser=cookies_from_browser,
+            telegram_proxy=telegram_proxy,
         )
